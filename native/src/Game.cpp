@@ -577,11 +577,11 @@ namespace discraft
 
 		void ProbeGeometry(Obj a_pawn)
 		{
-			static bool done = false;
-			if (done || !a_pawn) {
+			static std::uint32_t probedWorld = 0;
+			if (!a_pawn || worldId == 0 || worldId == probedWorld) {
 				return;
 			}
-			done = true;
+			probedWorld = worldId;
 			for (const char* c : { "Engine.PrimitiveComponent", "Engine.StaticMeshComponent", "Engine.StaticMesh", "Engine.StaticMeshCollectionActor",
 					 "Engine.BrushComponent", "Engine.Model", "Engine.Level", "Engine.World" }) {
 				DescribeClass(c);
@@ -598,7 +598,8 @@ namespace discraft
 			int total = 0;
 			for (int i = 0, n = ue3::ObjectCount(); i < n; ++i) {
 				const Obj o = ue3::ObjectAt(i);
-				if (!o || !ue3::IsA(o, smc) || ue3::IsDefaultObject(o)) {
+				if (!o || !ue3::IsA(o, smc) || ue3::IsDefaultObject(o) || ue3::NameOf(o).rfind("Default__", 0) == 0 ||
+					ue3::PathOf(o).find("Default__") != std::string::npos || !ue3::GetObj(o, mesh)) {
 					continue;
 				}
 				++total;
@@ -1054,15 +1055,23 @@ namespace discraft
 			// bGameDrives (the universal-modder passthrough rule: the host stays authoritative): Dishonored
 			// walks its player with its own collision and camera, and Minecraft's player is put there.
 			static const bool gameDrives = config::Bool("Control", "bGameDrives", true);
-			const bool        following = gameDrives && haveMc && st.mcInWorld && pawn && !menu;
+			// Flying in Minecraft (creative double jump, spectator): Minecraft drives instead, and the
+			// game's player is carried along through walls.
+			const bool mcFlying = haveMc && (mc.flags & proto::kMcFlying) != 0;
+			const bool live = haveMc && st.mcInWorld && pawn && !menu;
+			const bool puppet = live && (gameDrives ? mcFlying : mc.teleportAck == teleportSeq);
+			const bool following = gameDrives && live && !puppet;
 			st.mirrorButtons = following;
-			const bool puppet = !gameDrives && haveMc && st.mcInWorld && pawn && mc.teleportAck == teleportSeq && !menu;
+			if (puppet && !wasPuppet) {
+				st.yaw = UeYawToMc(pcRot.yaw);
+				st.pitch = UePitchToMc(pcRot.pitch);
+			}
 			if (puppet != wasPuppet) {
 				DC_INFO("puppet %s", puppet ? "on (Minecraft drives the player)" : "off");
 			}
 			st.puppeting = puppet;
 			// A Minecraft screen (inventory, chat, menu) takes every key and the cursor while it's open.
-			st.routeInput = gameDrives ? (following && st.mcScreenOpen) : (puppet || arriving);
+			st.routeInput = gameDrives ? ((following && st.mcScreenOpen) || puppet) : (puppet || arriving);
 			st.mcCrosshair = puppet && mc.cameraMode == 0 && !st.mcScreenOpen;
 			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
 
@@ -1106,15 +1115,15 @@ namespace discraft
 			}
 
 			proto::GameState gs{};
-			gs.flags = (pawn ? proto::kGameInGame : 0u) | (menu ? proto::kGameMenuOpen : 0u) | (!pawn ? proto::kGameLoading : 0u) | (gameDrives ? proto::kGameDrives : 0u);
+			gs.flags = (pawn ? proto::kGameInGame : 0u) | (menu ? proto::kGameMenuOpen : 0u) | (!pawn ? proto::kGameLoading : 0u) | (gameDrives && !puppet ? proto::kGameDrives : 0u);
 			gs.worldId = worldId;
 			gs.collisionEpoch = epoch;
 			const auto feet = UeToMc({ pawnLoc.x, pawnLoc.y, pawnLoc.z - halfHeight }, st.unitsPerBlock);
 			gs.posX = feet.x;
 			gs.posY = feet.y;
 			gs.posZ = feet.z;
-			gs.yaw = gameDrives ? UeYawToMc(pcRot.yaw) : st.yaw;
-			gs.pitch = gameDrives ? UePitchToMc(pcRot.pitch) : st.pitch;
+			gs.yaw = gameDrives && !puppet ? UeYawToMc(pcRot.yaw) : st.yaw;
+			gs.pitch = gameDrives && !puppet ? UePitchToMc(pcRot.pitch) : st.pitch;
 			gs.teleportSeq = teleportSeq;
 			gs.viewportW = static_cast<std::uint32_t>(st.overlayW.load());
 			gs.viewportH = static_cast<std::uint32_t>(st.overlayH.load());

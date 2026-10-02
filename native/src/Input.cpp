@@ -249,6 +249,11 @@ namespace discraft::Input
 				return st.installed;
 			}
 			if (!Routing()) {
+				// Space reaches both: Corvo jumps, and Minecraft sees the double tap that starts flying.
+				if (Mirroring() && a_vk == VK_SPACE) {
+					SendKey(a_scan, a_down);
+					return false;
+				}
 				if (Mirroring() && IsMcKey(a_vk)) {
 					if (a_vk == keys.minecraftMenu && keys.minecraftMenu) {
 						if (a_down && !a_repeat) {
