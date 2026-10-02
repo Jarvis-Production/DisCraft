@@ -577,15 +577,19 @@ namespace discraft
 
 		void ProbeGeometry(Obj a_pawn)
 		{
-			static std::uint32_t probedWorld = 0;
-			if (!a_pawn || worldId == 0 || worldId == probedWorld) {
+			// Until a level with meshes is loaded (the menu has none), every 10 s.
+			static bool      found = false;
+			static ULONGLONG nextTry = 0;
+			if (!a_pawn || found || ::GetTickCount64() < nextTry) {
 				return;
 			}
-			probedWorld = worldId;
-			for (const char* c : { "Engine.PrimitiveComponent", "Engine.StaticMeshComponent", "Engine.StaticMesh", "Engine.StaticMeshCollectionActor",
+			nextTry = ::GetTickCount64() + 10000;
+			static bool described = false;
+			for (const char* c : described ? std::initializer_list<const char*>{} : std::initializer_list<const char*>{ "Engine.PrimitiveComponent", "Engine.StaticMeshComponent", "Engine.StaticMesh", "Engine.StaticMeshCollectionActor",
 					 "Engine.BrushComponent", "Engine.Model", "Engine.Level", "Engine.World" }) {
 				DescribeClass(c);
 			}
+			described = true;
 			const Obj smc = ue3::FindClass("Engine.StaticMeshComponent");
 			const auto bounds = ue3::FindField(smc, "Bounds");
 			const auto mesh = ue3::FindField(smc, "StaticMesh");
@@ -608,6 +612,10 @@ namespace discraft
 				nearest.emplace_back(d, o);
 			}
 			std::sort(nearest.begin(), nearest.end());
+			if (total == 0) {
+				return;
+			}
+			found = true;
 			DC_INFO("probe: %d static mesh components; player at (%.0f, %.0f, %.0f)", total, at.x, at.y, at.z);
 			for (std::size_t k = 0; k < nearest.size() && k < 4; ++k) {
 				const Obj  o = nearest[k].second;
@@ -1337,13 +1345,21 @@ namespace discraft
 				if (!tickBroken) {
 					seh::Fault fault;
 					stage = "start";
-					if (!seh::Run([](void* a_pc) { Tick(reinterpret_cast<Obj>(a_pc)); }, a_self, fault)) {
+					static int failuresInARow = 0, failuresLogged = 0;
+					if (seh::Run([](void* a_pc) { Tick(reinterpret_cast<Obj>(a_pc)); }, a_self, fault)) {
+						failuresInARow = 0;
+					} else if (++failuresInARow < 30) {
+						// One bad frame (an actor going away mid-update): skip it and go on.
+						if (failuresLogged++ < 10) {
+							DC_WARN("per-frame update failed in \"%s\" (frame skipped): %s", stage, seh::Describe(fault).c_str());
+						}
+					} else {
 						tickBroken = true;
 						{
 							std::lock_guard guard(statusLock);
 							brokenAt = stage;
 						}
-						DC_ERROR("DisCraft stopped: the per-frame update failed in \"%s\": %s", stage, seh::Describe(fault).c_str());
+						DC_ERROR("DisCraft stopped: the per-frame update failed 30 frames in a row in \"%s\": %s", stage, seh::Describe(fault).c_str());
 					}
 				}
 			}

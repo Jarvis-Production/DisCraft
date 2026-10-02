@@ -285,11 +285,7 @@ public final class DisClient {
 		player.yRotO = game.yaw;
 		player.xRotO = game.pitch;
 		player.yHeadRot = player.yHeadRotO = game.yaw;
-		var abilities = player.getAbilities();
-		if (abilities.mayfly && !abilities.flying) {
-			abilities.flying = true;
-			player.onUpdateAbilities();
-		}
+		// Not flying: flying hands the controls to Minecraft (Dishonored watches MC_FLYING).
 	}
 
 	/** Freeze the player until Dishonored's collision around them has arrived. */
