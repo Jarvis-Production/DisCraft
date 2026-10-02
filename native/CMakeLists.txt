@@ -31,6 +31,7 @@ if(WIN32)
 		src/Actors.cpp
 		src/Bindings.cpp
 		src/Collision.cpp
+		src/MeshWorld.cpp
 		src/Game.cpp
 		src/Input.cpp
 		src/Launcher.cpp

@@ -500,6 +500,7 @@ namespace discraft::Collision
 		Flush();
 		tracesLogged = 0;  // show the first traces of every new world
 		regionsLogged = 0;
+		MeshWorld::Reset();
 		DC_INFO("collision: reset (epoch %u)", a_epoch);
 	}
 
@@ -513,7 +514,7 @@ namespace discraft::Collision
 			fastMode = true;
 			DC_WARN("collision: no Trace; finding surfaces with FastTrace (slower)");
 		}
-		if ((!traceLayout.ok && !fastMode) || ue3::ProcessEventIndex() <= 0 || !a_pawn || outbox.size() > 64) {
+		if ((!MeshWorld::Ready() && ((!traceLayout.ok && !fastMode) || ue3::ProcessEventIndex() <= 0)) || !a_pawn || outbox.size() > 64) {
 			return;
 		}
 		if (Link::Get().CollisionSpace() < (4ull << 20)) {
@@ -526,6 +527,15 @@ namespace discraft::Collision
 
 		std::vector<mesher::Hit> hits;
 		hits.reserve(kMaxHits * 2);
+		MeshWorld::Update(a_feet);
+		static bool wasMesh = false;
+		const bool  meshMode = MeshWorld::Ready();
+		if (meshMode != wasMesh) {
+			wasMesh = meshMode;
+			done.clear();  // redo every region from the meshes
+			job.active = false;
+			DC_INFO("collision: %s", meshMode ? "from the level's meshes" : "from traces");
+		}
 		while (true) {
 			if (!job.active) {
 				Key    key{};
@@ -540,7 +550,11 @@ namespace discraft::Collision
 			while (job.cursor < total) {
 				const int    i = job.cursor % g.nx, k = job.cursor / g.nx;
 				const double x = g.x0 + (i + 0.5) * g.cell, z = g.z0 + (k + 0.5) * g.cell;
-				TraceColumn(a_pawn, x, z, g.yMin, g.yMax, hits);
+				if (meshMode) {
+					MeshWorld::Column(x, z, g.yMin, g.yMax, hits);
+				} else {
+					TraceColumn(a_pawn, x, z, g.yMin, g.yMax, hits);
+				}
 				hitsTotal += static_cast<long long>(hits.size());
 				g.At(i, k) = mesher::IntervalsFromHits(hits, g.yMin, g.yMax, kThinSlab);
 				++job.cursor;
@@ -561,9 +575,9 @@ namespace discraft::Collision
 
 	std::string Summary()
 	{
-		char buf[160];
-		std::snprintf(buf, sizeof(buf), "%d regions sent, %lld traces, %lld surfaces, outbox %zu%s%s", regionsSent, tracesTotal, hitsTotal, outbox.size(),
-			traceLayout.ok ? "" : " (Trace missing)", fastMode ? " (FastTrace mode)" : "");
+		char buf[256];
+		std::snprintf(buf, sizeof(buf), "%d regions sent, %lld traces, %lld surfaces, outbox %zu%s%s; %s", regionsSent, tracesTotal, hitsTotal, outbox.size(),
+			traceLayout.ok ? "" : " (Trace missing)", fastMode ? " (FastTrace mode)" : "", MeshWorld::Summary().c_str());
 		return buf;
 	}
 }

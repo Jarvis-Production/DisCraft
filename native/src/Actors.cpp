@@ -140,7 +140,7 @@ namespace discraft::Actors
 				original = it != damageOriginals.end() ? it->second : nullptr;
 			}
 			auto& st = State();
-			if (!allowPlayerDamage && st.puppeting && self == st.playerPawn.load() && fn) {
+			if (!allowPlayerDamage && (st.puppeting || st.mirrorButtons) && self == st.playerPawn.load() && fn) {
 				if (std::uint8_t* locals = ue3::FrameLocals(a_frame, fn, self)) {
 					const auto amountField = ue3::FindField(fn, "DamageAmount");
 					const auto instigatorField = ue3::FindField(fn, "EventInstigator");

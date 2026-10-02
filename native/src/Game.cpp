@@ -913,7 +913,14 @@ namespace discraft
 
 			// Minecraft.
 			const bool mcAlive = link.McAlive();
-			const bool haveMc = mcAlive && link.ReadMcState(mc);
+			// A torn read keeps last frame's state (for up to half a second) instead of losing Minecraft.
+			static ULONGLONG lastGoodRead = 0;
+			bool             haveMc = mcAlive && link.ReadMcState(mc);
+			if (haveMc) {
+				lastGoodRead = ::GetTickCount64();
+			} else if (mcAlive && lastGoodRead && ::GetTickCount64() - lastGoodRead < 500) {
+				haveMc = true;
+			}
 			const auto mcPid = link.McPid();
 			const bool newMcProcess = mcAlive && mcPid != 0 && mcPid != lastMcPid;
 			if (mcAlive) {
@@ -1067,7 +1074,19 @@ namespace discraft
 			// game's player is carried along through walls.
 			const bool mcFlying = haveMc && (mc.flags & proto::kMcFlying) != 0;
 			const bool live = haveMc && st.mcInWorld && pawn && !menu;
-			const bool puppet = live && (gameDrives ? mcFlying : mc.teleportAck == teleportSeq);
+			// Debounced: a torn read of Minecraft's state for a frame mustn't swap who drives.
+			static float flyingFor = 0.0f, notFlyingFor = 0.0f;
+			static bool  flyingStable = false;
+			if (haveMc) {
+				flyingFor = mcFlying ? flyingFor + delta : 0.0f;
+				notFlyingFor = mcFlying ? 0.0f : notFlyingFor + delta;
+				if (flyingFor > 0.25f) {
+					flyingStable = true;
+				} else if (notFlyingFor > 0.25f) {
+					flyingStable = false;
+				}
+			}
+			const bool puppet = live && (gameDrives ? flyingStable : mc.teleportAck == teleportSeq);
 			const bool following = gameDrives && live && !puppet;
 			st.mirrorButtons = following;
 			if (puppet && !wasPuppet) {
@@ -1171,7 +1190,8 @@ namespace discraft
 			stage = "camera";
 			SnapshotCamera(a_pc, pawn, halfHeight);
 			stage = "actors and combat";
-			Actors::PerFrame(a_pc, pawn, puppet, delta);
+			// Minecraft's health counts whenever it's in the world (walking or flying).
+			Actors::PerFrame(a_pc, pawn, puppet || following, delta);
 			stage = "collision";
 			if (settleTimer > 0.0f) {
 				settleTimer -= delta;

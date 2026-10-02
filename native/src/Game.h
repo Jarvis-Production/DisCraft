@@ -2,6 +2,7 @@
 
 #include "Coords.h"
 #include "Link.h"
+#include "Mesher.h"
 #include "ue3/UE3.h"
 
 #include <atomic>
@@ -100,6 +101,16 @@ namespace discraft
 		// Game thread: traces part of the world around the player, sends finished regions.
 		void PerFrame(ue3::Obj a_pawn, const Vec3d& a_feet, bool a_urgent);
 		// "12 regions sent (3456 hits), 40 traces/frame" for the status log.
+		std::string Summary();
+	}
+
+	// Collision triangles read from the level's static meshes (MeshWorld.cpp).
+	namespace MeshWorld
+	{
+		void        Update(const Vec3d& a_feet);  // game thread, every frame: rebuilds now and then
+		void        Reset();                     // another map
+		bool        Ready();
+		void        Column(double a_x, double a_z, float a_yMin, float a_yMax, std::vector<mesher::Hit>& a_out);
 		std::string Summary();
 	}
 
