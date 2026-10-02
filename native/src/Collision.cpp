@@ -394,6 +394,12 @@ namespace discraft::Collision
 					proto::ColTri c{};
 					std::memcpy(c.v, t.v, sizeof(c.v));
 					c.flags = t.flags;
+					// Dishonored's streets, walls and rocks can be mined out (SkyCraft's digging).
+					static const bool diggable = config::Bool("World", "bDiggable", true);
+					static const auto material = static_cast<std::uint32_t>(std::clamp(config::Int("World", "iDigMaterial", proto::kDigStone), 1, proto::kDigMaterialCount - 1));
+					if (diggable && !(c.flags & proto::kTriStairHelper)) {
+						c.flags |= proto::kTriDiggable | (material << proto::kTriMaterialShift);
+					}
 					cubeTris.push_back(c);
 				}
 				proto::ColRegion header{ x0, cy * kRegion, z0, x0 + kRegion - 1, cy * kRegion + kRegion - 1, z0 + kRegion - 1, epoch,

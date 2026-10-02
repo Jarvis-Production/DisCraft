@@ -7,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -198,6 +200,10 @@ namespace discraft::WorldRender
 			s.translucent = counts[2];
 		}
 
+		// Blocks mined out of Dishonored's world, per section (bit x + 16z + 256y).
+		std::map<std::tuple<int, int, int>, std::array<std::uint8_t, 512>> dug;
+		bool stencilLogged = false;
+
 		void Handle(IDirect3DDevice9* a_device, std::uint32_t a_type, const std::uint8_t* a_data, std::uint32_t a_bytes)
 		{
 			switch (a_type) {
@@ -257,7 +263,23 @@ namespace discraft::WorldRender
 				}
 			case proto::kRenClearAll:
 				Clear();
+				dug.clear();
 				break;
+			case proto::kRenDug:
+				{
+					if (a_bytes < sizeof(proto::RenDug)) {
+						return;
+					}
+					proto::RenDug h;
+					std::memcpy(&h, a_data, sizeof(h));
+					const auto key = std::make_tuple(h.sx, h.sy, h.sz);
+					if (!h.count || a_bytes < sizeof(h) + 512) {
+						dug.erase(key);
+						return;
+					}
+					std::memcpy(dug[key].data(), a_data + sizeof(h), 512);
+					break;
+				}
 			case proto::kRenTexture:
 				{
 					if (a_bytes < sizeof(proto::RenTexture)) {
@@ -496,6 +518,100 @@ namespace discraft::WorldRender
 			16ull << 20);
 	}
 
+	namespace
+	{
+		// Dug cells near the camera as cubes (camera-relative), slightly grown so Minecraft's faces on
+		// their sides draw in front of the cut.
+		void DugCubes(const CameraView& a_view, std::vector<Vertex>& a_out)
+		{
+			constexpr int    kRange = 48;
+			constexpr float  e = 0.004f;
+			constexpr D3DCOLOR kHole = D3DCOLOR_XRGB(24, 20, 18);
+			static const int faces[6][4] = { { 0, 1, 3, 2 }, { 4, 6, 7, 5 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 2, 6, 4 }, { 1, 5, 7, 3 } };
+			for (const auto& [key, bits] : dug) {
+				const auto [sx, sy, sz] = key;
+				const double cx = sx * 16.0 + 8.0 - a_view.x, cy = sy * 16.0 + 8.0 - a_view.y, cz = sz * 16.0 + 8.0 - a_view.z;
+				if (std::fabs(cx) > kRange + 8 || std::fabs(cy) > kRange + 8 || std::fabs(cz) > kRange + 8) {
+					continue;
+				}
+				for (int i = 0; i < 4096; ++i) {
+					if (!(bits[i >> 3] & (1u << (i & 7)))) {
+						continue;
+					}
+					const float x0 = float(sx * 16 + (i & 15) - a_view.x) - e, y0 = float(sy * 16 + (i >> 8) - a_view.y) - e,
+								z0 = float(sz * 16 + ((i >> 4) & 15) - a_view.z) - e;
+					const float x1 = x0 + 1.0f + 2 * e, y1 = y0 + 1.0f + 2 * e, z1 = z0 + 1.0f + 2 * e;
+					Vertex c[8];
+					for (int k = 0; k < 8; ++k) {
+						c[k] = { (k & 4) ? x1 : x0, (k & 2) ? y1 : y0, (k & 1) ? z1 : z0, kHole, 0.0f, 0.0f };
+					}
+					for (const auto& f : faces) {
+						a_out.push_back(c[f[0]]);
+						a_out.push_back(c[f[1]]);
+						a_out.push_back(c[f[2]]);
+						a_out.push_back(c[f[0]]);
+						a_out.push_back(c[f[2]]);
+						a_out.push_back(c[f[3]]);
+					}
+				}
+			}
+		}
+
+		bool HasStencil(D3DFORMAT a_f) { return a_f == D3DFMT_D24S8 || a_f == D3DFMT_D24FS8 || a_f == D3DFMT_D24X4S4 || a_f == D3DFMT_D15S1; }
+
+		// Cuts the dug cells out of the game's picture: where the game's surface lies inside a dug cube
+		// (counted like a shadow volume in the stencil), its depth is pushed back to the cube's far
+		// side and painted dark; Minecraft's blocks around the hole then draw over it as its walls.
+		void PunchHoles(IDirect3DDevice9* a_device, const CameraView& a_view, bool a_reversed)
+		{
+			std::vector<Vertex> cubes;
+			DugCubes(a_view, cubes);
+			if (cubes.empty()) {
+				return;
+			}
+			const D3DMATRIX identity = Translation(0, 0, 0);
+			a_device->SetTransform(D3DTS_WORLD, &identity);
+			a_device->SetTexture(0, nullptr);
+			a_device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+			a_device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+			a_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+			a_device->Clear(0, nullptr, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+			// 1: count faces in front of the game's surface: front faces +1, back faces -1 (either sign
+			// of winding works, only "not zero" is tested).
+			a_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+			a_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+			a_device->SetRenderState(D3DRS_ZFUNC, a_reversed ? D3DCMP_GREATEREQUAL : D3DCMP_LESSEQUAL);
+			a_device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+			a_device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, TRUE);
+			a_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+			a_device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_INCR);
+			a_device->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+			a_device->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+			a_device->SetRenderState(D3DRS_CCW_STENCILFUNC, D3DCMP_ALWAYS);
+			a_device->SetRenderState(D3DRS_CCW_STENCILPASS, D3DSTENCILOP_DECR);
+			a_device->SetRenderState(D3DRS_CCW_STENCILFAIL, D3DSTENCILOP_KEEP);
+			a_device->SetRenderState(D3DRS_CCW_STENCILZFAIL, D3DSTENCILOP_KEEP);
+			a_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+			a_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+			a_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(cubes.size() / 3), cubes.data(), sizeof(Vertex));
+			// 2: inside a cube: take its far side's depth, and paint the hole.
+			a_device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
+			a_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_NOTEQUAL);
+			a_device->SetRenderState(D3DRS_STENCILREF, 0);
+			a_device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
+			a_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+			a_device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+			a_device->SetRenderState(D3DRS_ZFUNC, a_reversed ? D3DCMP_LESSEQUAL : D3DCMP_GREATEREQUAL);
+			a_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(cubes.size() / 3), cubes.data(), sizeof(Vertex));
+			// Back to drawing blocks.
+			a_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+			a_device->SetRenderState(D3DRS_ZFUNC, a_reversed ? D3DCMP_GREATEREQUAL : D3DCMP_LESSEQUAL);
+			a_device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+			a_device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+			a_device->SetTexture(0, atlas.tex);
+		}
+	}
+
 	void Draw(IDirect3DDevice9* a_device, const CameraView& a_view, int a_width, int a_height, int a_depthMode)
 	{
 		if (!a_view.valid || !atlas.tex || a_width <= 0 || a_height <= 0) {
@@ -571,6 +687,15 @@ namespace discraft::WorldRender
 		a_device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
 		a_device->SetFVF(kFvf);
 		a_device->SetTexture(0, atlas.tex);
+
+		if (useGame && !dug.empty()) {
+			if (HasStencil(dsDesc.Format)) {
+				PunchHoles(a_device, a_view, reversed);
+			} else if (!stencilLogged) {
+				stencilLogged = true;
+				DC_WARN("render: the game's depth buffer (format %u) has no stencil; dug holes can't be cut into its picture", static_cast<unsigned>(dsDesc.Format));
+			}
+		}
 
 		const auto sectionMatrix = [&](const Section& s) {
 			return Translation(s.sx * 16.0 - a_view.x, s.sy * 16.0 - a_view.y, s.sz * 16.0 - a_view.z);
