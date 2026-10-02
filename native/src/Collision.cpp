@@ -85,8 +85,9 @@ namespace discraft::Collision
 		};
 		// Trace can fail in this game (it is then left alone); the world's shape then comes from
 		// FastTrace, which only says whether a line is blocked: surfaces are found by halving.
-		int  traceFailures = 0;
-		bool fastMode = false;
+		int    traceFailures = 0;
+		bool   fastMode = true;    // [World] bUseTrace = 1 tries Actor.Trace first
+		double boxExtent = 2.0;    // Unreal units: floors here block boxes, not zero-width lines
 		struct FastLayout
 		{
 			int              size{ 0 };
@@ -139,6 +140,10 @@ namespace discraft::Collision
 				                 traceLayout.returnValue >= 0;
 				traceParms.assign(static_cast<std::size_t>(traceLayout.size) + 16, 0);
 			}
+			// Trace faults in this game (and a fault taken back still leaves the engine unsettled), and
+			// zero-width lines pass through its floors: FastTrace with a small box is the default.
+			fastMode = !config::Bool("World", "bUseTrace", false);
+			boxExtent = std::clamp(static_cast<double>(config::Float("World", "fTraceBoxExtent", 2.0f)), 0.0, 20.0);
 			if (Fn.fastTrace) {
 				const auto f = [](const char* n) { return ue3::FindField(Fn.fastTrace, n).offset; };
 				fastLayout.size = std::max(ue3::StructSize(Fn.fastTrace), 16);
@@ -155,7 +160,7 @@ namespace discraft::Collision
 				fastLayout.ok = fastLayout.traceEnd >= 0 && fastLayout.traceStart >= 0 && fastLayout.returnValue >= 0;
 				fastParms.assign(static_cast<std::size_t>(fastLayout.size) + 16, 0);
 			}
-			DC_INFO("collision: trace %s; budget %.1f ms (urgent %.1f), cells %.3f/%.3f, radius %d regions", traceLayout.ok ? "ready" : "MISSING", budgetMs,
+			DC_INFO("collision: %s, box %.1f; budget %.1f ms (urgent %.1f), cells %.3f/%.3f, radius %d regions", fastMode ? "FastTrace" : "Trace", boxExtent,
 				urgentBudgetMs, fineCell, coarseCell, radiusRegions);
 		}
 
@@ -213,6 +218,11 @@ namespace discraft::Collision
 			auto* p = fastParms.data();
 			std::memcpy(p + fastLayout.traceEnd, &a_to, 12);
 			std::memcpy(p + fastLayout.traceStart, &a_from, 12);
+			if (fastLayout.extent >= 0) {
+				const float    e = static_cast<float>(boxExtent);
+				const UeVector box{ e, e, e };
+				std::memcpy(p + fastLayout.extent, &box, 12);
+			}
 			++tracesTotal;
 			if (!ue3::CallFunction(a_pawn, Fn.fastTrace, p, &fastLayout.passed)) {
 				return true;
@@ -230,12 +240,13 @@ namespace discraft::Collision
 			a_out.clear();
 			const double upb = State().unitsPerBlock;
 			const double eps = 1.0 / 32.0;
-			const double step = 0.02;
+			const double box = boxExtent / upb;  // the box's half size in blocks
+			const double step = 0.02 + box;
 			for (int dir = 0; dir < 2; ++dir) {
 				const bool   down = dir == 0;
 				double       y = down ? a_yMax : a_yMin;
 				const double yEnd = down ? a_yMin : a_yMax;
-				for (int n = 0; n < kMaxHits; ++n) {
+				for (int n = 0; n < kMaxHits * 4 && static_cast<int>(a_out.size()) < kMaxHits * 2; ++n) {
 					if (down ? y <= yEnd + eps : y >= yEnd - eps) {
 						break;
 					}
@@ -252,11 +263,12 @@ namespace discraft::Collision
 							blockedBy = mid;
 						}
 					}
-					const double at = 0.5 * (clearTo + blockedBy);
-					if (std::abs(at - y) < 2.0 * eps) {
+					const double centre = 0.5 * (clearTo + blockedBy);  // the box's centre where it touches
+					if (std::abs(centre - y) < 2.0 * eps) {
 						y += down ? -0.125 : 0.125;  // started inside something: step through it
 						continue;
 					}
+					const double at = down ? centre - box : centre + box;
 					mesher::Hit  h;
 					h.y = static_cast<float>(at);
 					h.up = down;

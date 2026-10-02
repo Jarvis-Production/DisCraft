@@ -32,6 +32,9 @@ namespace discraft::log
 		if (n > 0 && n <= MAX_PATH) {
 			::CreateDirectoryW(base, nullptr);
 			std::wstring path = std::wstring(base) + L"\\DisCraft.log";
+			// The last run's log stays as DisCraft.prev.log (Dishonored starts twice: the first run's
+			// log would be gone otherwise).
+			::MoveFileExW(path.c_str(), (std::wstring(base) + L"\\DisCraft.prev.log").c_str(), MOVEFILE_REPLACE_EXISTING);
 			file = ::_wfopen(path.c_str(), L"w");
 		}
 #endif

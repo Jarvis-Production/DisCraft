@@ -295,6 +295,7 @@ namespace discraft
 		bool                         hudWasShown = true;
 		ULONGLONG                    hideScanAt = 0;
 		bool                         nearbyLogged = false;
+		bool                         componentsLogged = false;
 
 		void SetActorHidden(Obj a_actor, bool a_hidden)
 		{
@@ -400,6 +401,27 @@ namespace discraft
 					hiddenComponents.size());
 			};
 			hide(a_pawn);
+			// First-person arms and weapons can hang off the controller or its camera too.
+			const Obj camera = ue3::GetObj(a_pc, F.playerCamera);
+			for (const Obj holder : { a_pc, camera }) {
+				if (holder && ue3::IsObject(holder)) {
+					HideComponentsOf(holder);
+				}
+			}
+			if (!componentsLogged) {
+				componentsLogged = true;
+				for (const Obj holder : { a_pawn, a_pc, camera }) {
+					if (!holder || !ue3::IsObject(holder)) {
+						continue;
+					}
+					std::string list;
+					for (const Obj c : ue3::ObjectArray(holder, F.components)) {
+						list += (list.empty() ? "" : ", ") + ue3::NameOf(ue3::ClassOf(c)) + " " + ue3::NameOf(c) +
+						        (ue3::IsA(c, C.primitive) ? (ue3::GetBool(c, F.hiddenGame) ? " (hidden)" : " (shown)") : "");
+					}
+					DC_INFO("components of %s: %s", Who(holder).c_str(), list.empty() ? "none" : list.c_str());
+				}
+			}
 			const auto pawnLoc = bind::Location(a_pawn);
 			const int  count = ue3::ObjectCount();
 			for (int i = 0; i < count; ++i) {
@@ -532,9 +554,14 @@ namespace discraft
 			}
 			const UeVector eye{ at.x, at.y, at.z + a_halfHeight * 0.5f };
 			const UeVector below{ at.x, at.y, at.z - 1000.0f };
-			if (Fn.fastTrace) {
+			// FastTrace (what collision uses) from the eye down and from high above, as a line and as
+			// boxes: the game's floors may block only boxes.
+			const auto fastTest = [&](const char* a_label, const UeVector& a_from, const UeVector& a_to, float a_extent) {
+				if (!Fn.fastTrace) {
+					return;
+				}
 				ue3::Params p(Fn.fastTrace);
-				p.Set("TraceEnd", below).Set("TraceStart", eye).Set("BoxExtent", UeVector{}).SetBool("bTraceBullet", false);
+				p.Set("TraceEnd", a_to).Set("TraceStart", a_from).Set("BoxExtent", UeVector{ a_extent, a_extent, a_extent }).SetBool("bTraceBullet", false);
 				const auto          ret = ue3::FindField(Fn.fastTrace, "ReturnValue");
 				const std::uint32_t mark = 0xDEADBEEF;
 				if (ret) {
@@ -545,14 +572,22 @@ namespace discraft
 				if (ret) {
 					std::memcpy(&got, p.Data() + ret.offset, 4);
 				}
-				DC_INFO("self-test FastTrace down: call %s, returned %08X (0: blocked, nonzero: clear)", called ? "ok" : "FAILED", got);
+				DC_INFO("self-test FastTrace %s, box %.0f: call %s, returned %08X (0: blocked, nonzero: clear)", a_label, a_extent, called ? "ok" : "FAILED", got);
+			};
+			const UeVector above{ at.x, at.y, at.z + 3000.0f };
+			fastTest("eye down", eye, below, 0.0f);
+			fastTest("eye down", eye, below, 2.0f);
+			fastTest("eye down", eye, below, 10.0f);
+			fastTest("from high above", above, below, 2.0f);
+			if (!config::Bool("World", "bUseTrace", false)) {
+				return;  // Trace faults in this game; it isn't used
 			}
 			// World geometry only first (what collision uses); with actors last: a fault turns Trace
 			// off for the rest of the run.
 			const auto   rot = bind::Rotation(a_pc);
 			const double yaw = rot.yaw * (6.283185307179586 / 65536.0);
 			TestTrace("down, world only", a_pawn, eye, below, false, 0.0f);
-			TestTrace("from high above, world only", a_pawn, UeVector{ at.x, at.y, at.z + 3000.0f }, below, false, 0.0f);
+			TestTrace("from high above, world only", a_pawn, above, below, false, 0.0f);
 			TestTrace("forward, world only", a_pawn, eye, UeVector{ at.x + float(std::cos(yaw) * 3000.0), at.y + float(std::sin(yaw) * 3000.0), eye.z }, false,
 				0.0f);
 			TestTrace("down, world only, extent 10", a_pawn, eye, below, false, 10.0f);
