@@ -27,7 +27,7 @@ jobs:
           cmake --build build/native -j
           i686-w64-mingw32-strip build/native/DisCraft.asi
           file build/native/DisCraft.asi
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: discraft-asi
           path: build/native/DisCraft.asi
@@ -41,7 +41,7 @@ jobs:
         run: |
           cmake -S native -B build/native -A Win32
           cmake --build build/native --config Release
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: discraft-asi-msvc
           path: build/native/Release/DisCraft.asi
@@ -61,7 +61,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew build --no-configuration-cache --stacktrace
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: discraft-fabric
           path: fabric/build/libs/discraft-*.jar
@@ -72,11 +72,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         with:
           name: discraft-asi
           path: build/native
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         with:
           name: discraft-fabric
           path: fabric/build/libs
@@ -84,7 +84,7 @@ jobs:
         run: |
           ls -la build/native fabric/build/libs
           python3 tools/package.py --asi build/native/DisCraft.asi --jar "$(ls fabric/build/libs/discraft-*.jar | grep -v sources | head -1)"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: DisCraft-release
           path: dist/

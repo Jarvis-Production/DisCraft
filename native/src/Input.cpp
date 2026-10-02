@@ -334,7 +334,7 @@ namespace discraft::Input
 			UINT count = 0;
 			::GetRegisteredRawInputDevices(nullptr, &count, sizeof(RAWINPUTDEVICE));
 			std::vector<RAWINPUTDEVICE> devices(count);
-			bool                        keys = false, buttons = false;
+			bool                        keyboardRaw = false, buttonsRaw = false;
 			if (count && ::GetRegisteredRawInputDevices(devices.data(), &count, sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1)) {
 				for (const auto& d : devices) {
 					if (d.usUsagePage != 1) {
@@ -342,17 +342,18 @@ namespace discraft::Input
 					}
 					if (d.usUsage == 2) {
 						a_mouseRegistered = true;
-						buttons |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
+						buttonsRaw |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
 					} else if (d.usUsage == 6) {
-						keys |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
+						keyboardRaw |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
 					}
 				}
 			}
-			if (keys != rawKeys || buttons != rawButtons) {
-				DC_INFO("input: keys from %s, mouse buttons from %s", keys ? "Raw Input" : "window messages", buttons ? "Raw Input" : "window messages");
+			if (keyboardRaw != rawKeys || buttonsRaw != rawButtons) {
+				DC_INFO("input: keys from %s, mouse buttons from %s", keyboardRaw ? "Raw Input" : "window messages",
+					buttonsRaw ? "Raw Input" : "window messages");
 			}
-			rawKeys = keys;
-			rawButtons = buttons;
+			rawKeys = keyboardRaw;
+			rawButtons = buttonsRaw;
 			rawFlagsCheckedMs = ::GetTickCount64();
 		}
 
