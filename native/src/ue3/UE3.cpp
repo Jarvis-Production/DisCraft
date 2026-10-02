@@ -1074,6 +1074,7 @@ namespace discraft::ue3
 	namespace
 	{
 		constexpr std::uint8_t  kExLocalVariable = 0x00;
+		constexpr std::uint8_t  kExNothing = 0x0B;
 		constexpr std::uint8_t  kExEndFunctionParms = 0x16;
 		constexpr std::uint64_t kCpfParm = 0x80;
 		constexpr std::uint64_t kCpfReturnParm = 0x400;
@@ -1097,7 +1098,7 @@ namespace discraft::ue3
 		}
 
 		// 1 called, 0 not possible here (use ProcessEvent), -1 faulted.
-		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms, int a_lastParm)
+		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms, const std::vector<int>* a_passed)
 		{
 			if (!haveFrameTemplate || nativeDirectBroken || L.frameNode < 0 || L.elementSize < 0 || L.offset < 0) {
 				return 0;
@@ -1136,17 +1137,28 @@ namespace discraft::ue3
 				const int offset = Rd<std::int32_t>(p.prop + L.offset);
 				if (p.isReturn) {
 					returnOffset = offset;
-				} else if ((!flagsKnown || (p.flags & kCpfParm)) && offset <= a_lastParm) {
+				} else if (!flagsKnown || (p.flags & kCpfParm)) {
 					ordered.emplace_back(offset, p.prop);
 				}
 			}
 			std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+			// A parameter the call doesn't set is passed as EX_Nothing, the way an omitted optional
+			// parameter reaches a native: it keeps its default (and an optional out parameter, such
+			// as Trace's HitInfo, is absent). Ending the list early instead is not understood by this
+			// engine: the native reads on past EX_EndFunctionParms.
 			std::vector<std::uint8_t> code;
+			std::size_t               passed = 0;
+			const auto leftOut = [&](int a_offset) { return a_passed && std::find(a_passed->begin(), a_passed->end(), a_offset) == a_passed->end(); };
 			for (const auto& [offset, prop] : ordered) {
+				if (leftOut(offset)) {
+					code.push_back(kExNothing);
+					continue;
+				}
 				code.push_back(kExLocalVariable);
 				const Addr ref = prop;
 				const auto* bytes = reinterpret_cast<const std::uint8_t*>(&ref);
 				code.insert(code.end(), bytes, bytes + sizeof(ref));
+				++passed;
 			}
 			// What was passed, once per function, for the log.
 			static std::vector<Obj> described;
@@ -1158,12 +1170,12 @@ namespace discraft::ue3
 						char b[16];
 						std::snprintf(b, sizeof(b), "%X", static_cast<unsigned>(v));
 						return std::string(b);
-					}(offset);
+					}(offset) + (leftOut(offset) ? " (left out)" : "");
 				}
 				DC_INFO("UE3: native %s gets (%s), returns at 0x%X", PathOf(a_function).c_str(), list.c_str(), static_cast<unsigned>(returnOffset));
 			}
 			code.push_back(kExEndFunctionParms);
-			code.insert(code.end(), 16, std::uint8_t(0));
+			code.insert(code.end(), 16, kExNothing);  // never read; harmless if it were
 
 			std::array<std::uint8_t, 0x100> frame{};
 			std::memcpy(frame.data(), frameTemplate.data(), static_cast<std::size_t>(L.frameNode));
@@ -1193,8 +1205,8 @@ namespace discraft::ue3
 			static bool logged = false;
 			if (!logged) {
 				logged = true;
-				DC_INFO("UE3: natives are called directly (first: %s, %zu parameter(s), flags %s)", PathOf(a_function).c_str(), ordered.size(),
-					flagsKnown ? "known" : "not recognised");
+				DC_INFO("UE3: natives are called directly (first: %s, %zu of %zu parameter(s) passed, flags %s)", PathOf(a_function).c_str(), passed,
+					ordered.size(), flagsKnown ? "known" : "not recognised");
 			}
 			return 1;
 		}
@@ -1215,7 +1227,7 @@ namespace discraft::ue3
 
 	bool CallsWork() { return !callsBroken; }
 
-	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, int a_lastParm)
+	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, const std::vector<int>* a_passed)
 	{
 #if defined(_WIN32) && (defined(_M_IX86) || defined(__i386__))
 		if (!a_object || !a_function || processEventIndex <= 0 || callsBroken) {
@@ -1231,7 +1243,7 @@ namespace discraft::ue3
 			}
 		}
 		if (IsNativeFunction(a_function)) {
-			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms), a_lastParm);
+			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms), a_passed);
 			if (direct > 0) {
 				return true;
 			}
@@ -1289,7 +1301,7 @@ namespace discraft::ue3
 			const std::uint32_t mask = f.mask ? f.mask : 1u;
 			v = a_value ? (v | mask) : (v & ~mask);
 			std::memcpy(buffer_.data() + f.offset, &v, 4);
-			lastSet_ = std::max(lastSet_, f.offset);
+			MarkSet(f.offset);
 		}
 		return *this;
 	}
@@ -1311,7 +1323,7 @@ namespace discraft::ue3
 		if (!f || f.offset + 4 > static_cast<int>(buffer_.size())) {
 			return *this;
 		}
-		lastSet_ = std::max(lastSet_, f.offset);
+		MarkSet(f.offset);
 		if (f.kind == "FloatProperty") {
 			const float v = static_cast<float>(a_value);
 			std::memcpy(buffer_.data() + f.offset, &v, 4);
@@ -1351,7 +1363,7 @@ namespace discraft::ue3
 		return 0.0;
 	}
 
-	bool Params::Invoke(Obj a_object) { return CallFunction(a_object, function_, buffer_.data(), lastSet_); }
+	bool Params::Invoke(Obj a_object) { return CallFunction(a_object, function_, buffer_.data(), &set_); }
 
 	// ---- native hooks ------------------------------------------------------------------------
 

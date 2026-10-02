@@ -77,7 +77,8 @@ namespace discraft::Collision
 		struct TraceLayout
 		{
 			int  size{ 0 };
-			int  hitLocation{ -1 }, hitNormal{ -1 }, traceEnd{ -1 }, traceStart{ -1 }, traceActors{ -1 }, extent{ -1 }, returnValue{ -1 };
+			int  hitLocation{ -1 }, hitNormal{ -1 }, traceEnd{ -1 }, traceStart{ -1 }, traceActors{ -1 }, extent{ -1 }, extraFlags{ -1 }, returnValue{ -1 };
+			std::vector<int> passed;  // every parameter but HitInfo
 			std::uint32_t traceActorsMask{ 1 };
 			bool ok{ false };
 		};
@@ -111,6 +112,13 @@ namespace discraft::Collision
 				traceLayout.traceActors = actors.offset;
 				traceLayout.traceActorsMask = actors.mask ? actors.mask : 1u;
 				traceLayout.extent = f("Extent").offset;
+				traceLayout.extraFlags = f("ExtraTraceFlags").offset;
+				for (const int o : { traceLayout.hitLocation, traceLayout.hitNormal, traceLayout.traceEnd, traceLayout.traceStart, traceLayout.traceActors,
+						 traceLayout.extent, traceLayout.extraFlags }) {
+					if (o >= 0) {
+						traceLayout.passed.push_back(o);
+					}
+				}
 				traceLayout.returnValue = f("ReturnValue").offset;
 				traceLayout.ok = traceLayout.hitLocation >= 0 && traceLayout.hitNormal >= 0 && traceLayout.traceEnd >= 0 && traceLayout.traceStart >= 0 &&
 				                 traceLayout.returnValue >= 0;
@@ -139,11 +147,9 @@ namespace discraft::Collision
 				std::uint32_t v = traceLayout.traceActorsMask;
 				std::memcpy(p + traceLayout.traceActors, &v, 4);
 			}
-			// As script calls it: HitLocation, HitNormal, TraceEnd, TraceStart, bTraceActors. Extent,
-			// HitInfo (asking for it makes the trace look up materials) and ExtraTraceFlags keep
-			// their defaults.
-			const int lastParm = traceLayout.traceActors >= 0 ? traceLayout.traceActors : traceLayout.traceStart;
-			if (!ue3::CallFunction(a_pawn, Fn.trace, p, lastParm)) {
+			// Every parameter but HitInfo (asking for it makes the trace look up surface materials);
+			// Extent and ExtraTraceFlags are passed as zero.
+			if (!ue3::CallFunction(a_pawn, Fn.trace, p, &traceLayout.passed)) {
 				return out;
 			}
 			ue3::Addr actor = 0;

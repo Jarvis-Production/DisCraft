@@ -176,9 +176,9 @@ namespace discraft::ue3
 	void SetProcessEventIndex(int a_index);
 	int  ProcessEventIndex();
 	// Calls a function on an object exactly as the engine's native code calls script events.
-	// a_lastParm: a native gets its parameters up to the one at this offset; the rest are left
-	// out, as script leaves out trailing optional parameters (they keep their defaults).
-	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, int a_lastParm = 0x7FFFFFFF);
+	// a_passed: the offsets of the parameters a native gets; the others are left out the way script
+	// leaves out optional parameters (they keep their defaults). nullptr: all of them.
+	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, const std::vector<int>* a_passed = nullptr);
 
 	// A function's parameter block, filled and read by parameter name.
 	class Params
@@ -197,7 +197,7 @@ namespace discraft::ue3
 			const auto f = FindField(function_, a_name);
 			if (f && f.offset + static_cast<int>(sizeof(T)) <= static_cast<int>(buffer_.size())) {
 				std::memcpy(buffer_.data() + f.offset, &a_value, sizeof(T));
-				lastSet_ = f.offset > lastSet_ ? f.offset : lastSet_;
+				MarkSet(f.offset);
 			}
 			return *this;
 		}
@@ -225,7 +225,17 @@ namespace discraft::ue3
 	private:
 		Obj                       function_{ 0 };
 		std::vector<std::uint8_t> buffer_;
-		int                       lastSet_{ -1 };  // a native gets the parameters up to the last one set
+		std::vector<int>          set_;  // offsets of the parameters set: what a native gets
+
+		void MarkSet(int a_offset)
+		{
+			for (const int o : set_) {
+				if (o == a_offset) {
+					return;
+				}
+			}
+			set_.push_back(a_offset);
+		}
 	};
 
 	// ---- native hooks ------------------------------------------------------------------------
