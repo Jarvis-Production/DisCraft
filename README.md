@@ -91,8 +91,10 @@ Minecraft работает скрыто рядом с Dishonored. Нужно о�
    открывает мир «DisCraft», как только ты в уровне, и закрывается вместе с игрой.
 
 **Если у тебя уже есть `d3d9.dll`** (например, ReShade) или плагин не загружается, переименуй
-`d3d9.dll` из DisCraft в `dinput8.dll`, `ddraw.dll` или `winmm.dll`. Ultimate ASI Loader работает
-под любым из этих имён.
+`d3d9.dll` из DisCraft в `dinput8.dll`, `ddraw.dll` или `winmm.dll`. Ultimate ASI Loader понимает
+все эти имена, но сработает только та библиотека, которую игра действительно загружает, поэтому
+пробуй по очереди. Плагин загрузился, если появился (или обновился) файл
+`%LOCALAPPDATA%\DisCraft\DisCraft.log`.
 
 **Удаление:** удали из `Binaries\Win32` файлы `DisCraft.asi`, `DisCraft.ini`, `d3d9.dll` и папку
 `DisCraft`, затем папку `%LOCALAPPDATA%\DisCraft` (там Prism, твой вход в Microsoft, файлы
