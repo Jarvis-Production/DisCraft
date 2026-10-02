@@ -161,7 +161,17 @@ namespace discraft::Input
 			return ::GetTickCount64() - st.lastTickMs.load() < 300;
 		}
 
-		const void* activeDevice = nullptr;
+		// The game walks its player (bGameDrives): mouse buttons, the wheel and the hotbar keys still
+		// go to Minecraft (break, place, pick), the rest stays with the game.
+		bool Mirroring()
+		{
+			auto& st = State();
+			return !Routing() && st.mirrorButtons && !st.gameMenuOpen && !st.suspended && !st.mcScreenOpen &&
+			       ::GetTickCount64() - st.lastTickMs.load() < 300;
+		}
+
+		const void*          activeDevice = nullptr;
+		std::array<bool, 8> buttonDown{};
 
 		// a_device: which device (or read path) it came from; only one counts, since the game may
 		// read the same mouse several ways (state and buffered data, two device objects).
@@ -226,6 +236,10 @@ namespace discraft::Input
 				return st.installed;
 			}
 			if (!Routing()) {
+				if (Mirroring() && a_vk >= '1' && a_vk <= '9') {
+					SendKey(a_scan, a_down);
+					return true;
+				}
 				return false;
 			}
 			if (a_vk == keys.depthMode && keys.depthMode && !st.mcScreenOpen) {
@@ -261,8 +275,15 @@ namespace discraft::Input
 
 		bool OnButton(std::uint16_t a_sdlButton, bool a_down)
 		{
-			if (!Routing()) {
+			if (!Routing() && !Mirroring()) {
 				return false;
+			}
+			// The same click can come from window messages, Raw Input and DirectInput: send changes only.
+			if (a_sdlButton < buttonDown.size()) {
+				if (buttonDown[a_sdlButton] == a_down) {
+					return true;
+				}
+				buttonDown[a_sdlButton] = a_down;
 			}
 			Link::Get().PushInput(proto::kInMouseButton, a_sdlButton, a_down ? 1 : 0);
 			return true;
@@ -423,7 +444,7 @@ namespace discraft::Input
 					break;
 				}
 			case WM_MOUSEWHEEL:
-				if (Routing()) {
+				if (Routing() || Mirroring()) {
 					Link::Get().PushInput(proto::kInScroll, 0, GET_WHEEL_DELTA_WPARAM(a_wParam));
 					return 0;
 				}
@@ -502,13 +523,26 @@ namespace discraft::Input
 				return DIERR_GENERIC;
 			}
 			const HRESULT hr = v->getState(a_device, a_size, a_data);
-			if (FAILED(hr) || !a_data || !Routing()) {
+			const bool routing = !FAILED(hr) && a_data && Routing();
+			if (FAILED(hr) || !a_data || (!routing && !Mirroring())) {
 				return hr;
 			}
 			int type = 0;
 			{
 				std::lock_guard guard(diLock);
 				type = DeviceType(a_device, v);
+			}
+			if (!routing) {
+				// Mirroring: the game keeps the mouse movement, its buttons go to Minecraft only.
+				if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
+					auto* ms = static_cast<DIMOUSESTATE*>(a_data);
+					static constexpr std::uint16_t kSdl[4] = { 1, 3, 2, 4 };
+					for (int b = 0; b < 4; ++b) {
+						OnButton(kSdl[b], (ms->rgbButtons[b] & 0x80) != 0);
+					}
+					std::memset(ms->rgbButtons, 0, sizeof(ms->rgbButtons));
+				}
+				return hr;
 			}
 			if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
 				const auto* ms = static_cast<const DIMOUSESTATE*>(a_data);
@@ -536,6 +570,34 @@ namespace discraft::Input
 				return DIERR_GENERIC;
 			}
 			const HRESULT hr = v->getData(a_device, a_size, a_data, a_inOut, a_flags);
+			if (!FAILED(hr) && a_data && a_inOut && !(a_flags & DIGDD_PEEK) && !Routing() && Mirroring()) {
+				// Mirroring: drop the mouse button events, keep everything else for the game.
+				int mtype = 0;
+				{
+					std::lock_guard guard(diLock);
+					mtype = DeviceType(a_device, v);
+				}
+				if (mtype == DI8DEVTYPE_MOUSE) {
+					DWORD kept = 0;
+					auto* bytes = reinterpret_cast<std::uint8_t*>(a_data);
+					for (DWORD i = 0; i < *a_inOut; ++i) {
+						const auto* e = reinterpret_cast<const DIDEVICEOBJECTDATA*>(bytes + std::size_t(i) * a_size);
+						if (e->dwOfs >= DIMOFS_BUTTON0 && e->dwOfs <= DIMOFS_BUTTON7) {
+							static constexpr std::uint16_t kSdl[8] = { 1, 3, 2, 4, 5, 0, 0, 0 };
+							if (const auto b = kSdl[e->dwOfs - DIMOFS_BUTTON0]) {
+								OnButton(b, (e->dwData & 0x80) != 0);
+							}
+							continue;
+						}
+						if (kept != i) {
+							std::memmove(bytes + std::size_t(kept) * a_size, e, a_size);
+						}
+						++kept;
+					}
+					*a_inOut = kept;
+				}
+				return hr;
+			}
 			if (FAILED(hr) || !a_data || !a_inOut || !Routing() || (a_flags & DIGDD_PEEK)) {
 				return hr;
 			}
@@ -663,6 +725,7 @@ namespace discraft::Input
 	void ReleaseAll()
 	{
 		heldScan.fill(false);
+		buttonDown.fill(false);
 		Link::Get().PushInput(proto::kInReleaseAll, 0);
 	}
 

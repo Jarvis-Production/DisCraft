@@ -124,6 +124,10 @@ public final class DisClient {
 			lastPlayer = player;
 			teleportPending = true;
 		}
+		if (game.drives() && game.inGame() && !game.loading()) {
+			followGame(player);
+			return;
+		}
 		if (game.teleportSeq != lastTeleportSeq) {
 			lastTeleportSeq = game.teleportSeq;
 			teleportPending = true;
@@ -257,10 +261,45 @@ public final class DisClient {
 		DisLink.writeMcState(mc);
 	}
 
+	/**
+	 * Dishonored walks its own player (with its own collision and camera); Minecraft's player stands
+	 * exactly there and looks where Dishonored's camera looks, every frame. The host stays in charge,
+	 * like the universal-modder GTA V passthrough: no falling through floors Minecraft can't see.
+	 */
+	private static void followGame(LocalPlayer player) {
+		holdPos = null;
+		teleportPending = false;
+		teleportAck = game.teleportSeq;
+		double x = game.x, y = game.y, z = game.z;
+		if (player.distanceToSqr(x, y, z) > 64.0 * 64.0) {
+			requestTeleport(Minecraft.getInstance(), x, y, z, game.yaw, game.pitch);
+		}
+		player.setPos(x, y, z);
+		player.xo = player.xOld = x;
+		player.yo = player.yOld = y;
+		player.zo = player.zOld = z;
+		player.setDeltaMovement(Vec3.ZERO);
+		player.resetFallDistance();
+		player.setYRot(game.yaw);
+		player.setXRot(game.pitch);
+		player.yRotO = game.yaw;
+		player.xRotO = game.pitch;
+		player.yHeadRot = player.yHeadRotO = game.yaw;
+		var abilities = player.getAbilities();
+		if (abilities.mayfly && !abilities.flying) {
+			abilities.flying = true;
+			player.onUpdateAbilities();
+		}
+	}
+
 	/** Freeze the player until Dishonored's collision around them has arrived. */
 	private static void holdUntilReady(Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
 		if (!linked || player == null) {
+			return;
+		}
+		if (game.drives() && game.inGame() && !game.loading()) {
+			followGame(player);
 			return;
 		}
 		if (!game.inGame() || game.loading()) {

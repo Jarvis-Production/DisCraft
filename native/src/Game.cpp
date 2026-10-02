@@ -955,12 +955,17 @@ namespace discraft
 				holdMismatch = 0.0f;
 			}
 
-			const bool puppet = haveMc && st.mcInWorld && pawn && mc.teleportAck == teleportSeq && !menu;
+			// bGameDrives (the universal-modder passthrough rule: the host stays authoritative): Dishonored
+			// walks its player with its own collision and camera, and Minecraft's player is put there.
+			static const bool gameDrives = config::Bool("Control", "bGameDrives", true);
+			const bool        following = gameDrives && haveMc && st.mcInWorld && pawn && !menu;
+			st.mirrorButtons = following;
+			const bool puppet = !gameDrives && haveMc && st.mcInWorld && pawn && mc.teleportAck == teleportSeq && !menu;
 			if (puppet != wasPuppet) {
 				DC_INFO("puppet %s", puppet ? "on (Minecraft drives the player)" : "off");
 			}
 			st.puppeting = puppet;
-			st.routeInput = puppet || arriving;
+			st.routeInput = !gameDrives && (puppet || arriving);
 			st.mcCrosshair = puppet && mc.cameraMode == 0 && !st.mcScreenOpen;
 			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
 
@@ -978,7 +983,13 @@ namespace discraft
 				if (wasPuppet || (takenPawn && !arriving)) {
 					Release(a_pc);
 				}
-				if (arriving) {
+				if (following) {
+					stage = "hiding the game's player";
+					HideGamePlayer(a_pc, pawn);
+				} else if (gameDrives && !hiddenActors.empty() && (!haveMc || !st.mcInWorld)) {
+					ShowGamePlayer();
+				}
+				if (arriving && !gameDrives) {
 					SetIgnoreInput(a_pc, true);  // the game's controls don't move its player meanwhile
 					// The game's camera follows the controller: keep turning it with the mouse.
 					ue3::Set(a_pc, F.rotation, bind::Rot3i{ McPitchToUe(st.pitch), McYawToUe(st.yaw), 0 });
@@ -998,15 +1009,15 @@ namespace discraft
 			}
 
 			proto::GameState gs{};
-			gs.flags = (pawn ? proto::kGameInGame : 0u) | (menu ? proto::kGameMenuOpen : 0u) | (!pawn ? proto::kGameLoading : 0u);
+			gs.flags = (pawn ? proto::kGameInGame : 0u) | (menu ? proto::kGameMenuOpen : 0u) | (!pawn ? proto::kGameLoading : 0u) | (gameDrives ? proto::kGameDrives : 0u);
 			gs.worldId = worldId;
 			gs.collisionEpoch = epoch;
 			const auto feet = UeToMc({ pawnLoc.x, pawnLoc.y, pawnLoc.z - halfHeight }, st.unitsPerBlock);
 			gs.posX = feet.x;
 			gs.posY = feet.y;
 			gs.posZ = feet.z;
-			gs.yaw = st.yaw;
-			gs.pitch = st.pitch;
+			gs.yaw = gameDrives ? UeYawToMc(pcRot.yaw) : st.yaw;
+			gs.pitch = gameDrives ? UePitchToMc(pcRot.pitch) : st.pitch;
 			gs.teleportSeq = teleportSeq;
 			gs.viewportW = static_cast<std::uint32_t>(st.overlayW.load());
 			gs.viewportH = static_cast<std::uint32_t>(st.overlayH.load());

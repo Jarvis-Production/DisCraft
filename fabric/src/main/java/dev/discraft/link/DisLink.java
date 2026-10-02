@@ -211,6 +211,10 @@ public final class DisLink {
 			return (this.flags & GAME_MENU_OPEN) != 0;
 		}
 
+		public boolean drives() {
+			return (this.flags & GAME_DRIVES) != 0;
+		}
+
 		public boolean loading() {
 			return (this.flags & GAME_LOADING) != 0;
 		}

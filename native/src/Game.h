@@ -29,6 +29,8 @@ namespace discraft
 		std::atomic<bool> puppeting{ false };
 		// Keyboard and mouse go to Minecraft (puppeting, or Minecraft arriving after a teleport).
 		std::atomic<bool> routeInput{ false };
+		// The game moves its player (bGameDrives): only mouse buttons, the wheel and 1-9 go to Minecraft.
+		std::atomic<bool> mirrorButtons{ false };
 		std::atomic<bool> mcScreenOpen{ false };
 		std::atomic<bool> gameMenuOpen{ false };
 		std::atomic<bool> mcInWorld{ false };

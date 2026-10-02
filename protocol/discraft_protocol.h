@@ -65,6 +65,7 @@ namespace discraft::proto
 		kGameInGame = 1u << 0,    // a level is loaded and the player has a pawn
 		kGameMenuOpen = 1u << 1,  // a Dishonored menu (or a scripted scene) owns input; MC should drop held keys
 		kGameLoading = 1u << 2,   // loading screen / level transition in progress
+		kGameDrives = 1u << 3,    // the game moves its own player; Minecraft's player stands at posX/Y/Z every frame
 	};
 
 	// The game's water around the player, for Minecraft to treat as its own water: swimming,
