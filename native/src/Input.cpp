@@ -161,18 +161,23 @@ namespace discraft::Input
 			return ::GetTickCount64() - st.lastTickMs.load() < 300;
 		}
 
-		void AddDelta(long a_dx, long a_dy, Source a_source)
+		const void* activeDevice = nullptr;
+
+		// a_device: which device (or read path) it came from; only one counts, since the game may
+		// read the same mouse several ways (state and buffered data, two device objects).
+		void AddDelta(long a_dx, long a_dy, Source a_source, const void* a_device = nullptr)
 		{
 			if (!a_dx && !a_dy) {
 				return;
 			}
 			const ULONGLONG now = ::GetTickCount64();
 			// Only one source counts (the game may read the same mouse two ways).
-			if (activeSource != a_source) {
+			if (activeSource != a_source || activeDevice != a_device) {
 				if (activeSource != Source::kNone && now - activeSourceMs < 1000) {
 					return;
 				}
 				activeSource = a_source;
+				activeDevice = a_device;
 				DC_INFO("input: mouse movement from %s", a_source == Source::kRaw ? "Raw Input" : "DirectInput");
 			}
 			activeSourceMs = now;
@@ -507,7 +512,7 @@ namespace discraft::Input
 			}
 			if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
 				const auto* ms = static_cast<const DIMOUSESTATE*>(a_data);
-				AddDelta(ms->lX, ms->lY, Source::kDirectInput);
+				AddDelta(ms->lX, ms->lY, Source::kDirectInput, a_device);
 				std::memset(a_data, 0, a_size);
 			} else if (type == DI8DEVTYPE_KEYBOARD && a_size == 256) {
 				auto* bytes = static_cast<std::uint8_t*>(a_data);
@@ -548,9 +553,9 @@ namespace discraft::Input
 				auto* e = reinterpret_cast<DIDEVICEOBJECTDATA*>(bytes + std::size_t(i) * a_size);
 				if (type == DI8DEVTYPE_MOUSE) {
 					if (e->dwOfs == DIMOFS_X) {
-						AddDelta(static_cast<long>(e->dwData), 0, Source::kDirectInput);
+						AddDelta(static_cast<long>(e->dwData), 0, Source::kDirectInput, reinterpret_cast<const char*>(a_device) + 1);
 					} else if (e->dwOfs == DIMOFS_Y) {
-						AddDelta(0, static_cast<long>(e->dwData), Source::kDirectInput);
+						AddDelta(0, static_cast<long>(e->dwData), Source::kDirectInput, reinterpret_cast<const char*>(a_device) + 1);
 					}
 					continue;  // the game gets none of it
 				}

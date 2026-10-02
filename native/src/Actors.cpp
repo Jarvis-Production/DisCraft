@@ -5,6 +5,7 @@
 #include "Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -276,8 +277,9 @@ namespace discraft::Actors
 			const Obj      type = a_ev.weapon == proto::kWeaponArrow ? damageProjectile : damageMelee;
 			const auto     loc = bind::Location(target);
 			ue3::Params    p(takeDamage);
-			p.SetNumber("DamageAmount", damage);
-			p.Set<ue3::Addr>("EventInstigator", static_cast<ue3::Addr>(a_pc));
+			p.SetNumber("DamageAmount", damage).SetNumber("Damage", damage);  // UE3 / Dishonored names
+			p.Set<ue3::Addr>("EventInstigator", static_cast<ue3::Addr>(a_pc)).Set<ue3::Addr>("InstigatedBy", static_cast<ue3::Addr>(a_pc));
+			p.Set("HitInfo", std::array<std::uint8_t, 0x1C>{});  // a native wants its out struct passed
 			p.Set("HitLocation", loc);
 			p.Set("Momentum", momentum);
 			p.Set<ue3::Addr>("DamageType", static_cast<ue3::Addr>(type));

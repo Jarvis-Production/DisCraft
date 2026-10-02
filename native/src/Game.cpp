@@ -296,6 +296,7 @@ namespace discraft
 		ULONGLONG                    hideScanAt = 0;
 		bool                         nearbyLogged = false;
 		bool                         componentsLogged = false;
+		bool                         itemsLogged = false;
 
 		void SetActorHidden(Obj a_actor, bool a_hidden)
 		{
@@ -420,6 +421,60 @@ namespace discraft
 						        (ue3::IsA(c, C.primitive) ? (ue3::GetBool(c, F.hiddenGame) ? " (hidden)" : " (shown)") : "");
 					}
 					DC_INFO("components of %s: %s", Who(holder).c_str(), list.empty() ? "none" : list.c_str());
+				}
+			}
+			// Components kept elsewhere (Dishonored's ArkComponentContainer, inventory items): every
+			// primitive component whose outer is the pawn, the controller or an item they own.
+			{
+				const int n = ue3::ObjectCount();
+				int       extra = 0;
+				for (int i = 0; i < n; ++i) {
+					const Obj c = ue3::ObjectAt(i);
+					if (!c || !ue3::IsA(c, C.primitive) || ue3::IsDefaultObject(c)) {
+						continue;
+					}
+					const Obj outer = ue3::OuterOf(c);
+					if (!outer || !(outer == a_pawn || outer == a_pc || (ue3::IsA(outer, C.actor) && BelongsTo(outer, a_pawn, a_pc)))) {
+						continue;
+					}
+					bool known = false;
+					for (const auto& h : hiddenComponents) {
+						known = known || h.component == c;
+					}
+					if (known) {
+						continue;
+					}
+					const bool was = ue3::GetBool(c, F.hiddenGame);
+					hiddenComponents.push_back({ c, was });
+					if (!was) {
+						SetComponentHidden(c, true);
+						if (++extra <= 20) {
+							DC_INFO("hid component %s of %s", Who(c).c_str(), Who(outer).c_str());
+						}
+					}
+				}
+			}
+			if (!itemsLogged) {
+				itemsLogged = true;
+				const int n = ue3::ObjectCount();
+				int       listed = 0;
+				for (int i = 0; i < n && listed < 40; ++i) {
+					const Obj o = ue3::ObjectAt(i);
+					if (!o || !ue3::IsA(o, C.actor) || ue3::IsDefaultObject(o)) {
+						continue;
+					}
+					std::string cls = ue3::NameOf(ue3::ClassOf(o));
+					std::string low = cls;
+					for (auto& ch : low) {
+						ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+					}
+					if (low.find("weapon") == std::string::npos && low.find("inventory") == std::string::npos && low.find("arm") == std::string::npos &&
+						low.find("hand") == std::string::npos && low.find("sword") == std::string::npos && low.find("firstperson") == std::string::npos) {
+						continue;
+					}
+					++listed;
+					DC_INFO("item actor: %s (owner %s, base %s, instigator %s, hidden %d)", Who(o).c_str(), Who(ue3::GetObj(o, F.owner)).c_str(),
+						Who(ue3::GetObj(o, F.base)).c_str(), Who(ue3::GetObj(o, F.instigator)).c_str(), ue3::GetBool(o, F.hidden));
 				}
 			}
 			const auto pawnLoc = bind::Location(a_pawn);
@@ -556,12 +611,12 @@ namespace discraft
 			const UeVector below{ at.x, at.y, at.z - 1000.0f };
 			// FastTrace (what collision uses) from the eye down and from high above, as a line and as
 			// boxes: the game's floors may block only boxes.
-			const auto fastTest = [&](const char* a_label, const UeVector& a_from, const UeVector& a_to, float a_extent) {
+			const auto fastTest = [&](const char* a_label, const UeVector& a_from, const UeVector& a_to, float a_extent, bool a_bullet = false) {
 				if (!Fn.fastTrace) {
 					return;
 				}
 				ue3::Params p(Fn.fastTrace);
-				p.Set("TraceEnd", a_to).Set("TraceStart", a_from).Set("BoxExtent", UeVector{ a_extent, a_extent, a_extent }).SetBool("bTraceBullet", false);
+				p.Set("TraceEnd", a_to).Set("TraceStart", a_from).Set("BoxExtent", UeVector{ a_extent, a_extent, a_extent }).SetBool("bTraceBullet", a_bullet);
 				const auto          ret = ue3::FindField(Fn.fastTrace, "ReturnValue");
 				const std::uint32_t mark = 0xDEADBEEF;
 				if (ret) {
@@ -572,13 +627,18 @@ namespace discraft
 				if (ret) {
 					std::memcpy(&got, p.Data() + ret.offset, 4);
 				}
-				DC_INFO("self-test FastTrace %s, box %.0f: call %s, returned %08X (0: blocked, nonzero: clear)", a_label, a_extent, called ? "ok" : "FAILED", got);
+				DC_INFO("self-test FastTrace %s, box %.0f, complex %d: call %s, returned %08X (0: blocked, nonzero: clear)", a_label, a_extent, a_bullet,
+					called ? "ok" : "FAILED", got);
 			};
 			const UeVector above{ at.x, at.y, at.z + 3000.0f };
 			fastTest("eye down", eye, below, 0.0f);
 			fastTest("eye down", eye, below, 2.0f);
 			fastTest("eye down", eye, below, 10.0f);
 			fastTest("from high above", above, below, 2.0f);
+			fastTest("eye down", eye, below, 0.0f, true);
+			fastTest("eye down", eye, below, 2.0f, true);
+			fastTest("from high above", above, below, 2.0f, true);
+			fastTest("from high above", above, below, 40.0f, true);
 			if (!config::Bool("World", "bUseTrace", false)) {
 				return;  // Trace faults in this game; it isn't used
 			}

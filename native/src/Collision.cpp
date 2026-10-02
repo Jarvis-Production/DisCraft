@@ -87,7 +87,8 @@ namespace discraft::Collision
 		// FastTrace, which only says whether a line is blocked: surfaces are found by halving.
 		int    traceFailures = 0;
 		bool   fastMode = true;    // [World] bUseTrace = 1 tries Actor.Trace first
-		double boxExtent = 2.0;    // Unreal units: floors here block boxes, not zero-width lines
+		double boxExtent = 2.0;
+		bool   bulletTrace = true;  // complex (per-polygon) collision: simple collision may be missing    // Unreal units: floors here block boxes, not zero-width lines
 		struct FastLayout
 		{
 			int              size{ 0 };
@@ -143,6 +144,7 @@ namespace discraft::Collision
 			// Trace faults in this game (and a fault taken back still leaves the engine unsettled), and
 			// zero-width lines pass through its floors: FastTrace with a small box is the default.
 			fastMode = !config::Bool("World", "bUseTrace", false);
+			bulletTrace = config::Bool("World", "bTraceComplex", true);
 			boxExtent = std::clamp(static_cast<double>(config::Float("World", "fTraceBoxExtent", 2.0f)), 0.0, 20.0);
 			if (Fn.fastTrace) {
 				const auto f = [](const char* n) { return ue3::FindField(Fn.fastTrace, n).offset; };
@@ -160,8 +162,7 @@ namespace discraft::Collision
 				fastLayout.ok = fastLayout.traceEnd >= 0 && fastLayout.traceStart >= 0 && fastLayout.returnValue >= 0;
 				fastParms.assign(static_cast<std::size_t>(fastLayout.size) + 16, 0);
 			}
-			DC_INFO("collision: %s, box %.1f; budget %.1f ms (urgent %.1f), cells %.3f/%.3f, radius %d regions", fastMode ? "FastTrace" : "Trace", boxExtent,
-				urgentBudgetMs, fineCell, coarseCell, radiusRegions);
+			DC_INFO("collision: %s, box %.1f, bullet %d; budget %.1f ms (urgent %.1f), cells %.3f/%.3f, radius %d regions", fastMode ? "FastTrace" : "Trace", boxExtent, bulletTrace, budgetMs, urgentBudgetMs, fineCell, coarseCell, radiusRegions);
 		}
 
 		struct TraceHit
@@ -222,6 +223,10 @@ namespace discraft::Collision
 				const float    e = static_cast<float>(boxExtent);
 				const UeVector box{ e, e, e };
 				std::memcpy(p + fastLayout.extent, &box, 12);
+			}
+			if (fastLayout.bullet >= 0) {
+				const std::uint32_t b = bulletTrace ? 1u : 0u;
+				std::memcpy(p + fastLayout.bullet, &b, 4);
 			}
 			++tracesTotal;
 			if (!ue3::CallFunction(a_pawn, Fn.fastTrace, p, &fastLayout.passed)) {
