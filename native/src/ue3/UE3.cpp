@@ -985,6 +985,22 @@ namespace discraft::ue3
 		return out;
 	}
 
+	std::vector<Obj> ChildrenOf(Obj a_struct)
+	{
+		std::vector<Obj> out;
+		if (!a_struct) {
+			return out;
+		}
+		int guard = 0;
+		for (Obj f = Rd<Addr>(a_struct + L.children); f && guard < 100000; f = Rd<Addr>(f + L.next), ++guard) {
+			if (!IsObject(f)) {
+				break;
+			}
+			out.push_back(f);
+		}
+		return out;
+	}
+
 	bool GetBool(Obj a_object, const Field& a_field)
 	{
 		return a_object && a_field && (Rd<std::uint32_t>(a_object + a_field.offset) & (a_field.mask ? a_field.mask : 1u)) != 0;

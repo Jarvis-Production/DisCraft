@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cctype>
 #include <cmath>
 #include <deque>
 #include <unordered_map>
@@ -44,6 +46,8 @@ namespace discraft
 		int                            tickDepth = 0;  // game thread only
 		bool                           processEventSearched = false;
 		bool                           warnedNoOriginal = false;
+		std::string                    tickName;  // the candidate that matched, once one has
+		std::atomic<bool>              tickMissing{ false };
 
 		// ---- game-thread state --------------------------------------------------------------------
 		proto::McState mc{};
@@ -709,6 +713,86 @@ namespace discraft
 			}
 		}
 
+		// The class a function belongs to: its outer, or the class around the state it's declared in.
+		Obj OwnerClass(Obj a_function)
+		{
+			Obj owner = ue3::OuterOf(a_function);
+			if (owner && ue3::NameOf(ue3::ClassOf(owner)) == "State") {
+				owner = ue3::OuterOf(owner);
+			}
+			return owner;
+		}
+
+		int HookNamed(const std::string& a_name)
+		{
+			int added = 0;
+			for (const Obj f : ue3::FunctionsNamed(a_name)) {
+				if (tickOriginals.count(f) || !ue3::IsChildOf(OwnerClass(f), C.playerController)) {
+					continue;
+				}
+				void* original = ue3::GetFunc(f);
+				if (!original || original == reinterpret_cast<void*>(&PlayerTickThunk)) {
+					continue;
+				}
+				tickOriginals.emplace(f, original);
+				tickFunctions.push_back(f);
+				ue3::SetFunc(f, reinterpret_cast<void*>(&PlayerTickThunk));
+				++added;
+				DC_INFO("hooked %s (%s)", ue3::PathOf(f).c_str(), ue3::IsNativeFunction(f) ? "native" : "script");
+			}
+			return added;
+		}
+
+		std::string Lower(std::string a_text)
+		{
+			for (auto& c : a_text) {
+				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			}
+			return a_text;
+		}
+
+		// Logged once when no candidate matched: what the engine has, for picking sTickFunction.
+		void DescribeTickCandidates(const std::vector<std::string>& a_names)
+		{
+			for (const auto& name : a_names) {
+				const auto found = ue3::FunctionsNamed(name);
+				DC_INFO("tick candidates: %d function(s) named %s", static_cast<int>(found.size()), name.c_str());
+				int shown = 0;
+				for (const Obj f : found) {
+					if (++shown > 12) {
+						break;
+					}
+					const Obj owner = OwnerClass(f);
+					DC_INFO("  %s: owner %s, player controller %s, func %p", ue3::PathOf(f).c_str(), ue3::FullNameOf(owner).c_str(),
+						ue3::IsChildOf(owner, C.playerController) ? "yes" : "no", ue3::GetFunc(f));
+				}
+			}
+			// The class of a live player controller, if there is one yet, else PlayerController itself.
+			Obj       cls = C.playerController;
+			const int count = ue3::ObjectCount();
+			for (int i = 0; i < count; ++i) {
+				const Obj o = ue3::ObjectAt(i);
+				if (o && ue3::IsA(o, C.playerController) && !ue3::IsDefaultObject(o)) {
+					cls = ue3::ClassOf(o);
+					break;
+				}
+			}
+			int listed = 0;
+			for (Obj s = cls; s && listed < 80; s = ue3::SuperOf(s)) {
+				for (const Obj f : ue3::ChildrenOf(s)) {
+					if (ue3::NameOf(ue3::ClassOf(f)) != "Function") {
+						continue;
+					}
+					const auto name = ue3::NameOf(f);
+					if (Lower(name).find("tick") != std::string::npos || Lower(name).find("move") != std::string::npos) {
+						DC_INFO("  function %s.%s", ue3::NameOf(s).c_str(), name.c_str());
+						++listed;
+					}
+				}
+			}
+			DC_INFO("tick candidates: player controller class %s, %d tick/move functions listed", ue3::PathOf(cls).c_str(), listed);
+		}
+
 		void HookTickFunctions()
 		{
 			// Only when packages were loaded since the last look (a map load adds classes), or once a
@@ -722,21 +806,16 @@ namespace discraft
 			}
 			scannedCount = objectCount;
 			scannedAt = now;
-			const auto name = config::String("Engine", "sTickFunction", "PlayerTick");
+			// The first candidate that exists wins and is kept; hooking two (say PlayerTick and Tick)
+			// would run our update twice a frame.
+			const auto names = tickName.empty() ? config::List("Engine", "sTickFunction", "PlayerTick,PlayerMove,Tick") : std::vector<std::string>{ tickName };
 			int        added = 0;
-			for (const Obj f : ue3::FunctionsNamed(name)) {
-				if (tickOriginals.count(f) || !ue3::IsChildOf(ue3::OuterOf(f), C.playerController)) {
-					continue;
+			for (const auto& name : names) {
+				added += HookNamed(name);
+				if (!tickFunctions.empty()) {
+					tickName = name;
+					break;
 				}
-				void* original = ue3::GetFunc(f);
-				if (!original || original == reinterpret_cast<void*>(&PlayerTickThunk)) {
-					continue;
-				}
-				tickOriginals.emplace(f, original);
-				tickFunctions.push_back(f);
-				ue3::SetFunc(f, reinterpret_cast<void*>(&PlayerTickThunk));
-				++added;
-				DC_INFO("hooked %s (%s)", ue3::PathOf(f).c_str(), ue3::IsNativeFunction(f) ? "native" : "script");
 			}
 			if (!added) {
 				return;
@@ -760,18 +839,30 @@ namespace discraft
 				HookTickFunctions();  // overrides from packages loaded since
 				return true;
 			}
-			if (!bind::Bind()) {
-				return false;
+			static bool bound = false;
+			if (!bound) {
+				if (!bind::Bind()) {
+					return false;
+				}
+				bound = true;
+				epoch = static_cast<std::uint32_t>(::GetTickCount64() & 0xFFFF) << 8;
+				teleportSeq = epoch;
 			}
-			epoch = static_cast<std::uint32_t>(::GetTickCount64() & 0xFFFF) << 8;
-			teleportSeq = epoch;
 			HookTickFunctions();
 			if (tickFunctions.empty()) {
-				DC_ERROR("no %s function found on a PlayerController class", config::String("Engine", "sTickFunction", "PlayerTick").c_str());
+				// Retried as packages load (the frame update may live in a class loaded later);
+				// said once, with what the engine has instead.
+				if (!tickMissing) {
+					tickMissing = true;
+					const auto names = config::List("Engine", "sTickFunction", "PlayerTick,PlayerMove,Tick");
+					DC_ERROR("no %s function found on a PlayerController class yet; still looking", config::String("Engine", "sTickFunction", "PlayerTick,PlayerMove,Tick").c_str());
+					DescribeTickCandidates(names);
+				}
 				return false;
 			}
 			Actors::Install();
 			st.installed = true;
+			tickMissing = false;
 			DC_INFO("DisCraft installed into the game");
 			return true;
 		}
@@ -783,7 +874,7 @@ namespace discraft
 				return L"DisCraft: Unreal Engine data not found; see %LOCALAPPDATA%\\DisCraft\\DisCraft.log";
 			}
 			if (!st.installed) {
-				return L"";
+				return tickMissing ? L"DisCraft: can't hook the game's frame update yet; see %LOCALAPPDATA%\\DisCraft\\DisCraft.log" : L"";
 			}
 			std::lock_guard guard(statusLock);
 			return status;

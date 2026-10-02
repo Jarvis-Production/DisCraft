@@ -145,6 +145,8 @@ namespace discraft::ue3
 	int   EnumValue(Obj a_enum, std::string_view a_name);
 	// Every UFunction object with this name (all classes' overrides).
 	std::vector<Obj> FunctionsNamed(std::string_view a_name);
+	// A struct's own fields and functions (not its super's), in declaration order.
+	std::vector<Obj> ChildrenOf(Obj a_struct);
 
 	template <class T>
 	T Get(Obj a_object, const Field& a_field)
