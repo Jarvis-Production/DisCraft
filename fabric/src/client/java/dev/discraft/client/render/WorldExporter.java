@@ -130,9 +130,19 @@ public final class WorldExporter {
 		blockRenderer = new ModelBlockRenderer(ao, true, minecraft.getBlockColors());
 		fluidRenderer = new FluidRenderer(minecraft.getModelManager().getFluidStateModelSet());
 		DisLink.writeRender(Proto.REN_CLEAR_ALL, ByteBuffer.allocate(0), null);
+		// The atlas (2048x2576 is 21 MB) is bigger than one render message may be: announce its size,
+		// then send it in strips of rows.
 		ByteBuffer header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putInt(atlas.width).putInt(atlas.height).flip();
-		boolean ok = DisLink.writeRender(Proto.REN_ATLAS, header, atlas.pixels.duplicate().clear());
-		DisCraft.LOG.info("DisCraft: sent {}x{} texture atlas to Dishonored ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
+		boolean ok = DisLink.writeRender(Proto.REN_ATLAS, header, null);
+		int rowBytes = atlas.width * 4;
+		int stripRows = Math.max(1, (4 << 20) / rowBytes);
+		for (int y = 0; ok && y < atlas.height; y += stripRows) {
+			int rows = Math.min(stripRows, atlas.height - y);
+			ByteBuffer strip = atlas.pixels.duplicate().clear().position(y * rowBytes).limit((y + rows) * rowBytes).slice();
+			ByteBuffer region = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(0).putInt(y).putInt(atlas.width).putInt(rows).flip();
+			ok = DisLink.writeRender(Proto.REN_ATLAS_REGION, region, strip);
+		}
+		DisCraft.LOG.info("DisCraft: sent {}x{} texture atlas to Dishonored in strips of {} rows ({})", atlas.width, atlas.height, stripRows, ok ? "ok" : "FAILED");
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();

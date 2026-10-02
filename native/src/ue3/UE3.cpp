@@ -1064,6 +1064,129 @@ namespace discraft::ue3
 		}
 	}
 
+	// ---- calling native functions the way script does --------------------------------------------
+	// ProcessEvent hands a native function an FFrame whose Code is the function's own script, and
+	// Dishonored's natives read nothing useful from it (Trace traced nowhere, SetLocation moved
+	// nothing). Script calls a native with its arguments as bytecode in the caller's frame: one
+	// EX_LocalVariable <property> per parameter, then EX_EndFunctionParms. DisCraft builds such a
+	// frame over the parameter buffer (Locals) and calls the native's Func directly.
+	namespace
+	{
+		constexpr std::uint8_t  kExLocalVariable = 0x00;
+		constexpr std::uint8_t  kExEndFunctionParms = 0x16;
+		constexpr std::uint64_t kCpfParm = 0x80;
+		constexpr std::uint64_t kCpfReturnParm = 0x400;
+
+		std::array<std::uint8_t, 0x100> frameTemplate{};
+		bool                            haveFrameTemplate = false;
+		bool                            nativeDirectBroken = false;
+
+		struct NativeCall
+		{
+			NativeFn      fn;
+			void*         self;
+			std::uint8_t* frame;
+			void*         result;
+		};
+
+		void DoNative(void* a_call)
+		{
+			const auto* c = static_cast<NativeCall*>(a_call);
+			c->fn(c->self, c->frame, c->result);
+		}
+
+		// 1 called, 0 not possible here (use ProcessEvent), -1 faulted.
+		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms)
+		{
+			if (!haveFrameTemplate || nativeDirectBroken || L.frameNode < 0 || L.elementSize < 0 || L.offset < 0) {
+				return 0;
+			}
+			const auto func = reinterpret_cast<std::uintptr_t>(GetFunc(a_function));
+			if (!mem::InCode(func) || func == processInternal) {
+				return 0;
+			}
+			struct Parm
+			{
+				Obj           prop;
+				std::uint64_t flags;
+				bool          isReturn;
+			};
+			std::vector<Parm> parms;
+			for (const Obj p : ChildrenOf(a_function)) {
+				const auto kind = NameOf(ClassOf(p));
+				if (kind.size() < 8 || kind.compare(kind.size() - 8, 8, "Property") != 0) {
+					continue;
+				}
+				const auto flags = Rd<std::uint64_t>(p + L.elementSize + 4);
+				parms.push_back({ p, flags, NameOf(p) == "ReturnValue" || (flags & kCpfReturnParm) != 0 });
+			}
+			// PropertyFlags sit right after ElementSize in every UE3 build seen; if the flags don't
+			// look like parameter flags, a native's properties are all parameters anyway.
+			bool flagsKnown = false;
+			for (const auto& p : parms) {
+				flagsKnown = flagsKnown || (p.flags & kCpfParm) != 0;
+			}
+			std::vector<std::uint8_t> code;
+			int                       returnOffset = -1;
+			for (const auto& p : parms) {
+				if (p.isReturn) {
+					returnOffset = Rd<std::int32_t>(p.prop + L.offset);
+					continue;
+				}
+				if (flagsKnown && !(p.flags & kCpfParm)) {
+					break;  // locals follow the parameters
+				}
+				code.push_back(kExLocalVariable);
+				const Addr ref = p.prop;
+				const auto* bytes = reinterpret_cast<const std::uint8_t*>(&ref);
+				code.insert(code.end(), bytes, bytes + sizeof(ref));
+			}
+			code.push_back(kExEndFunctionParms);
+			code.insert(code.end(), 16, std::uint8_t(0));
+
+			std::array<std::uint8_t, 0x100> frame{};
+			std::memcpy(frame.data(), frameTemplate.data(), static_cast<std::size_t>(L.frameNode));
+			const auto put = [&](int a_at, std::uintptr_t a_value) {
+				const Addr v = static_cast<Addr>(a_value);
+				std::memcpy(frame.data() + a_at, &v, sizeof(v));
+			};
+			put(L.frameNode, a_function);
+			put(L.frameNode + 4, a_object);
+			put(L.frameNode + 8, reinterpret_cast<std::uintptr_t>(code.data()));
+			put(L.frameNode + 12, reinterpret_cast<std::uintptr_t>(a_parms));
+			std::uint8_t scratch[64]{};
+			NativeCall   call{ reinterpret_cast<NativeFn>(func), reinterpret_cast<void*>(a_object), frame.data(),
+                returnOffset >= 0 ? static_cast<void*>(a_parms + returnOffset) : static_cast<void*>(scratch) };
+			seh::Fault fault;
+			if (!seh::Run(&DoNative, &call, fault)) {
+				DC_ERROR("UE3: calling native %s on %s directly failed: %s; back to ProcessEvent", PathOf(a_function).c_str(), FullNameOf(a_object).c_str(),
+					seh::Describe(fault).c_str());
+				nativeDirectBroken = true;
+				return -1;
+			}
+			static bool logged = false;
+			if (!logged) {
+				logged = true;
+				DC_INFO("UE3: natives are called directly (first: %s, %zu parameter(s), flags %s)", PathOf(a_function).c_str(), (code.size() - 17) / 5,
+					flagsKnown ? "known" : "not recognised");
+			}
+			return 1;
+		}
+	}
+
+	void CaptureFrameTemplate(void* a_frame)
+	{
+		if (haveFrameTemplate || L.frameNode < 0 || L.frameNode > 0x40) {
+			return;
+		}
+		const auto frame = reinterpret_cast<std::uintptr_t>(a_frame);
+		if (!frame || !Ok(frame, static_cast<std::size_t>(L.frameNode))) {
+			return;
+		}
+		std::memcpy(frameTemplate.data(), a_frame, static_cast<std::size_t>(L.frameNode));
+		haveFrameTemplate = true;
+	}
+
 	bool CallsWork() { return !callsBroken; }
 
 	bool CallFunction(Obj a_object, Obj a_function, void* a_parms)
@@ -1079,6 +1202,12 @@ namespace discraft::ue3
 				if (m != configured) {
 					callModes.push_back(m);
 				}
+			}
+		}
+		if (IsNativeFunction(a_function)) {
+			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms));
+			if (direct > 0) {
+				return true;
 			}
 		}
 		const Addr vtable = Rd<Addr>(a_object);

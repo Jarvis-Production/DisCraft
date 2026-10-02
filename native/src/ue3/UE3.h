@@ -239,6 +239,8 @@ namespace discraft::ue3
 	int           FrameCalledFromScript(void* a_frame, Obj a_self);
 	// False once calls through ProcessEvent have faulted in every native call mode.
 	bool          CallsWork();
+	// Keeps a copy of a live FFrame's header (its vtable and flags) for calling natives directly.
+	void          CaptureFrameTemplate(void* a_frame);
 	// "Dishonored.exe+0x1234" for a code address.
 	std::string   Where(std::uintptr_t a_address);
 }

@@ -208,8 +208,21 @@ namespace discraft::WorldRender
 					}
 					proto::RenAtlas h;
 					std::memcpy(&h, a_data, sizeof(h));
-					if (a_bytes >= sizeof(h) + std::size_t(h.width) * h.height * 4 && Upload(a_device, atlas, h.width, h.height, a_data + sizeof(h))) {
-						DC_INFO("render: block atlas %ux%u", h.width, h.height);
+					if (a_bytes >= sizeof(h) + std::size_t(h.width) * h.height * 4) {
+						if (Upload(a_device, atlas, h.width, h.height, a_data + sizeof(h))) {
+							DC_INFO("render: block atlas %ux%u", h.width, h.height);
+						}
+					} else if (h.width && h.height && h.width <= 16384 && h.height <= 16384) {
+						// Size only: the pixels follow as atlas regions (strips).
+						Release(atlas.tex);
+						atlas.w = atlas.h = 0;
+						if (SUCCEEDED(a_device->CreateTexture(h.width, h.height, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &atlas.tex, nullptr))) {
+							atlas.w = h.width;
+							atlas.h = h.height;
+							DC_INFO("render: block atlas %ux%u (arriving in strips)", h.width, h.height);
+						} else {
+							DC_ERROR("render: atlas texture %ux%u creation failed", h.width, h.height);
+						}
 					}
 					break;
 				}

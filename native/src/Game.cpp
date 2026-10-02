@@ -749,11 +749,16 @@ namespace discraft
 			if (mcAlive && ::GetTickCount64() - statusLoggedAt > 10000) {
 				statusLoggedAt = ::GetTickCount64();
 				const auto gameFeet = UeToMc({ pawnLoc.x, pawnLoc.y, pawnLoc.z - halfHeight }, st.unitsPerBlock);
-				const auto rotNow = bind::Rotation(a_pc);
-				DC_INFO("status: puppet %d, arriving %d, menu %d, mc in world %d, screen %d | mouse %.0f | look %.1f/%.1f, controller %.1f/%.1f | "
+				// The controller as the game left it this frame (before ours), and the camera it rendered.
+				const auto rotNow = pcRot;
+				bind::Rot3i camRot{};
+				if (const Obj cam = ue3::GetObj(a_pc, F.playerCamera); cam && F.povRotation >= 0) {
+					camRot = mem::Read<bind::Rot3i>(cam + static_cast<std::uintptr_t>(F.povRotation));
+				}
+				DC_INFO("status: puppet %d, arriving %d, menu %d, mc in world %d, screen %d | mouse %.0f | look %.1f/%.1f, controller %.1f/%.1f, camera %.1f/%.1f | "
 						"mc (%.2f, %.2f, %.2f) ack %u/%u, game feet (%.2f, %.2f, %.2f), physics %u | collision %s",
 					puppet, arriving, menu, st.mcInWorld.load(), st.mcScreenOpen.load(), lookTravel, st.yaw, st.pitch, UeYawToMc(rotNow.yaw),
-					UePitchToMc(rotNow.pitch), mc.x, mc.y, mc.z, mc.teleportAck, teleportSeq, gameFeet.x, gameFeet.y, gameFeet.z,
+					UePitchToMc(rotNow.pitch), UeYawToMc(camRot.yaw), UePitchToMc(camRot.pitch), mc.x, mc.y, mc.z, mc.teleportAck, teleportSeq, gameFeet.x, gameFeet.y, gameFeet.z,
 					pawn ? ue3::Get<std::uint8_t>(pawn, F.physics) : 0u, Collision::Summary().c_str());
 				lookTravel = 0.0f;
 			}
@@ -922,6 +927,9 @@ namespace discraft
 			}
 			--tickDepth;
 			if (outermost) {
+				if (ue3::FrameCalledFromScript(a_frame, self) >= 0) {
+					ue3::CaptureFrameTemplate(a_frame);
+				}
 				if (!processEventSearched && ue3::FrameCalledFromScript(a_frame, self) == 0) {
 					FindProcessEvent(self, ra);
 				}
