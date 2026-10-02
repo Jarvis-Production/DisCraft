@@ -72,11 +72,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
         with:
           name: discraft-asi
           path: build/native
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
         with:
           name: discraft-fabric
           path: fabric/build/libs
