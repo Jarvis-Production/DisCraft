@@ -139,7 +139,11 @@ namespace discraft::Collision
 				std::uint32_t v = traceLayout.traceActorsMask;
 				std::memcpy(p + traceLayout.traceActors, &v, 4);
 			}
-			if (!ue3::CallFunction(a_pawn, Fn.trace, p)) {
+			// As script calls it: HitLocation, HitNormal, TraceEnd, TraceStart, bTraceActors. Extent,
+			// HitInfo (asking for it makes the trace look up materials) and ExtraTraceFlags keep
+			// their defaults.
+			const int lastParm = traceLayout.traceActors >= 0 ? traceLayout.traceActors : traceLayout.traceStart;
+			if (!ue3::CallFunction(a_pawn, Fn.trace, p, lastParm)) {
 				return out;
 			}
 			ue3::Addr actor = 0;

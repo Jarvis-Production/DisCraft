@@ -1,5 +1,8 @@
 #include "Seh.h"
 
+#include "Log.h"
+
+#include <algorithm>
 #include <cstdio>
 
 #ifdef _WIN32
@@ -82,4 +85,95 @@ namespace discraft::seh
 		}
 		return std::string(what) + " at " + Where(a_fault.address);
 	}
+
+	namespace
+	{
+		const char* volatile activity = nullptr;
+	}
+
+	void SetActivity(const char* a_what) { activity = a_what; }
+
+#ifdef _WIN32
+	namespace
+	{
+		bool IsCode(std::uintptr_t a_address)
+		{
+			MEMORY_BASIC_INFORMATION info{};
+			if (!::VirtualQuery(reinterpret_cast<LPCVOID>(a_address), &info, sizeof(info)) || info.State != MEM_COMMIT || info.Type != MEM_IMAGE) {
+				return false;
+			}
+			return (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+		}
+
+		volatile LONG crashesLogged = 0;
+
+		LONG CALLBACK FirstChance(EXCEPTION_POINTERS* a_info)
+		{
+			const DWORD code = a_info->ExceptionRecord->ExceptionCode;
+			switch (code) {
+			case EXCEPTION_ACCESS_VIOLATION:
+			case EXCEPTION_ILLEGAL_INSTRUCTION:
+			case EXCEPTION_PRIV_INSTRUCTION:
+			case EXCEPTION_INT_DIVIDE_BY_ZERO:
+			case EXCEPTION_STACK_OVERFLOW:
+			case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+			case EXCEPTION_IN_PAGE_ERROR:
+			case 0xC0000409:  // stack buffer overrun / fail fast
+				break;
+			default:
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
+			if (::InterlockedIncrement(&crashesLogged) > 6) {
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
+			Fault fault;
+			fault.code = code;
+			fault.address = reinterpret_cast<std::uintptr_t>(a_info->ExceptionRecord->ExceptionAddress);
+			if (code == EXCEPTION_ACCESS_VIOLATION && a_info->ExceptionRecord->NumberParameters >= 2) {
+				fault.access = static_cast<int>(a_info->ExceptionRecord->ExceptionInformation[0]);
+				fault.data = static_cast<std::uintptr_t>(a_info->ExceptionRecord->ExceptionInformation[1]);
+			}
+			const char* what = activity;
+			if (code == EXCEPTION_STACK_OVERFLOW) {
+				DC_ERROR("crash (first chance): stack overflow at %s, thread %lu, while %s", Where(fault.address).c_str(), ::GetCurrentThreadId(),
+					what ? what : "not in a DisCraft call");
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
+			// Code addresses on the stack: the call chain, roughly (no frame pointers needed).
+			std::string stack;
+#	if defined(_M_IX86) || defined(__i386__)
+			std::uintptr_t sp = a_info->ContextRecord->Esp;
+#	else
+			std::uintptr_t sp = 0;
+#	endif
+			// Up to 8 KB of the stack, within the committed region it lives in.
+			std::uintptr_t end = sp;
+			MEMORY_BASIC_INFORMATION region{};
+			if (sp && ::VirtualQuery(reinterpret_cast<LPCVOID>(sp), &region, sizeof(region)) && region.State == MEM_COMMIT &&
+				!(region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+				end = std::min<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize, sp + 0x2000);
+			}
+			int found = 0;
+			for (; sp + 4 <= end && found < 14; sp += 4) {
+				const auto value = *reinterpret_cast<const std::uint32_t*>(sp);
+				if (value > 0x10000 && IsCode(value)) {
+					stack += (stack.empty() ? "" : ", ") + Where(value);
+					++found;
+				}
+			}
+			DC_ERROR("crash (first chance): %s, thread %lu, while %s; code on the stack: %s", Describe(fault).c_str(), ::GetCurrentThreadId(),
+				what ? what : "not in a DisCraft call", stack.c_str());
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+	}
+
+	void InstallCrashLog()
+	{
+		if (::AddVectoredExceptionHandler(1, &FirstChance)) {
+			DC_INFO("crash log armed (first-chance exceptions are logged)");
+		}
+	}
+#else
+	void InstallCrashLog() {}
+#endif
 }

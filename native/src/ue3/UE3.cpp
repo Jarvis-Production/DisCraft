@@ -1097,7 +1097,7 @@ namespace discraft::ue3
 		}
 
 		// 1 called, 0 not possible here (use ProcessEvent), -1 faulted.
-		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms)
+		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms, int a_lastParm)
 		{
 			if (!haveFrameTemplate || nativeDirectBroken || L.frameNode < 0 || L.elementSize < 0 || L.offset < 0) {
 				return 0;
@@ -1136,7 +1136,7 @@ namespace discraft::ue3
 				const int offset = Rd<std::int32_t>(p.prop + L.offset);
 				if (p.isReturn) {
 					returnOffset = offset;
-				} else if (!flagsKnown || (p.flags & kCpfParm)) {
+				} else if ((!flagsKnown || (p.flags & kCpfParm)) && offset <= a_lastParm) {
 					ordered.emplace_back(offset, p.prop);
 				}
 			}
@@ -1178,8 +1178,13 @@ namespace discraft::ue3
 			std::uint8_t scratch[64]{};
 			NativeCall   call{ reinterpret_cast<NativeFn>(func), reinterpret_cast<void*>(a_object), frame.data(),
                 returnOffset >= 0 ? static_cast<void*>(a_parms + returnOffset) : static_cast<void*>(scratch) };
+			static std::string activity;
+			activity = "calling native " + PathOf(a_function) + " on " + FullNameOf(a_object);
+			seh::SetActivity(activity.c_str());
 			seh::Fault fault;
-			if (!seh::Run(&DoNative, &call, fault)) {
+			const bool ran = seh::Run(&DoNative, &call, fault);
+			seh::SetActivity(nullptr);
+			if (!ran) {
 				DC_ERROR("UE3: calling native %s on %s directly failed: %s; back to ProcessEvent", PathOf(a_function).c_str(), FullNameOf(a_object).c_str(),
 					seh::Describe(fault).c_str());
 				nativeDirectBroken = true;
@@ -1210,7 +1215,7 @@ namespace discraft::ue3
 
 	bool CallsWork() { return !callsBroken; }
 
-	bool CallFunction(Obj a_object, Obj a_function, void* a_parms)
+	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, int a_lastParm)
 	{
 #if defined(_WIN32) && (defined(_M_IX86) || defined(__i386__))
 		if (!a_object || !a_function || processEventIndex <= 0 || callsBroken) {
@@ -1226,7 +1231,7 @@ namespace discraft::ue3
 			}
 		}
 		if (IsNativeFunction(a_function)) {
-			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms));
+			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms), a_lastParm);
 			if (direct > 0) {
 				return true;
 			}
@@ -1284,6 +1289,7 @@ namespace discraft::ue3
 			const std::uint32_t mask = f.mask ? f.mask : 1u;
 			v = a_value ? (v | mask) : (v & ~mask);
 			std::memcpy(buffer_.data() + f.offset, &v, 4);
+			lastSet_ = std::max(lastSet_, f.offset);
 		}
 		return *this;
 	}
@@ -1305,6 +1311,7 @@ namespace discraft::ue3
 		if (!f || f.offset + 4 > static_cast<int>(buffer_.size())) {
 			return *this;
 		}
+		lastSet_ = std::max(lastSet_, f.offset);
 		if (f.kind == "FloatProperty") {
 			const float v = static_cast<float>(a_value);
 			std::memcpy(buffer_.data() + f.offset, &v, 4);
@@ -1344,7 +1351,7 @@ namespace discraft::ue3
 		return 0.0;
 	}
 
-	bool Params::Invoke(Obj a_object) { return CallFunction(a_object, function_, buffer_.data()); }
+	bool Params::Invoke(Obj a_object) { return CallFunction(a_object, function_, buffer_.data(), lastSet_); }
 
 	// ---- native hooks ------------------------------------------------------------------------
 

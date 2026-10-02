@@ -26,4 +26,12 @@ namespace discraft::seh
 	std::string Describe(const Fault& a_fault);
 	// "Dishonored.exe+0x12345" (or the bare address).
 	std::string Where(std::uintptr_t a_address);
+
+	// What DisCraft is doing on this thread right now ("calling native Engine.Actor.Trace on ..."),
+	// for the crash log. The string must outlive the activity; nullptr when done.
+	void SetActivity(const char* a_what);
+	// Logs serious exceptions (access violations, illegal instructions, stack overflows, ...) as
+	// they happen, before the game's own handlers: where, what DisCraft was doing, and the code
+	// addresses found on the stack. Only logs; the exception goes on as if this weren't there.
+	void InstallCrashLog();
 }

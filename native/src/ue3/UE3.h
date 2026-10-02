@@ -176,7 +176,9 @@ namespace discraft::ue3
 	void SetProcessEventIndex(int a_index);
 	int  ProcessEventIndex();
 	// Calls a function on an object exactly as the engine's native code calls script events.
-	bool CallFunction(Obj a_object, Obj a_function, void* a_parms);
+	// a_lastParm: a native gets its parameters up to the one at this offset; the rest are left
+	// out, as script leaves out trailing optional parameters (they keep their defaults).
+	bool CallFunction(Obj a_object, Obj a_function, void* a_parms, int a_lastParm = 0x7FFFFFFF);
 
 	// A function's parameter block, filled and read by parameter name.
 	class Params
@@ -195,6 +197,7 @@ namespace discraft::ue3
 			const auto f = FindField(function_, a_name);
 			if (f && f.offset + static_cast<int>(sizeof(T)) <= static_cast<int>(buffer_.size())) {
 				std::memcpy(buffer_.data() + f.offset, &a_value, sizeof(T));
+				lastSet_ = f.offset > lastSet_ ? f.offset : lastSet_;
 			}
 			return *this;
 		}
@@ -222,6 +225,7 @@ namespace discraft::ue3
 	private:
 		Obj                       function_{ 0 };
 		std::vector<std::uint8_t> buffer_;
+		int                       lastSet_{ -1 };  // a native gets the parameters up to the last one set
 	};
 
 	// ---- native hooks ------------------------------------------------------------------------

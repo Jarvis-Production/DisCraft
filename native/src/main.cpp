@@ -2,6 +2,7 @@
 #include "Game.h"
 #include "Link.h"
 #include "Log.h"
+#include "Seh.h"
 #include "ue3/UE3.h"
 
 #include <string>
@@ -180,6 +181,9 @@ namespace
 		wchar_t exe[MAX_PATH]{};
 		::GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		DC_INFO("DisCraft %s loading into %s (DisCraft.ini %s)", kVersion, config::Narrow(exe).c_str(), config::Found() ? "found" : "not found: defaults");
+		if (config::Bool("Debug", "bCrashLog", true)) {
+			seh::InstallCrashLog();
+		}
 		if (!Link::Get().Create()) {
 			DC_ERROR("DisCraft disabled: could not create shared memory");
 			return 0;
