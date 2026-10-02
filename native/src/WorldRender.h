@@ -4,6 +4,9 @@
 
 #include <d3d9.h>
 
+#include <array>
+#include <vector>
+
 // Minecraft's blocks, entities and the block outline, drawn into Dishonored's own frame with
 // Direct3D 9's fixed-function pipeline (no shader compiler needed), from the meshes Minecraft
 // streams through the render ring. Render thread only.
@@ -18,4 +21,6 @@ namespace discraft::WorldRender
 	void OnLostDevice();
 	// Forget all meshes (Minecraft reconnected).
 	void Clear();
+	// Blocks Minecraft dug since the last call (Minecraft block coords). Any thread.
+	void TakeNewDug(std::vector<std::array<int, 3>>& a_out);
 }

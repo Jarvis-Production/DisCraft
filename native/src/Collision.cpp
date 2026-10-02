@@ -529,7 +529,12 @@ namespace discraft::Collision
 		hits.reserve(kMaxHits * 2);
 		MeshWorld::Update(a_feet);
 		static bool wasMesh = false;
+		static int  meshGeneration = 0;
 		const bool  meshMode = MeshWorld::Ready();
+		if (meshMode && MeshWorld::Generation() != meshGeneration) {
+			meshGeneration = MeshWorld::Generation();
+			wasMesh = false;  // props broke: redo the regions once the rebuilt collision is in
+		}
 		if (meshMode != wasMesh) {
 			wasMesh = meshMode;
 			done.clear();  // redo every region from the meshes

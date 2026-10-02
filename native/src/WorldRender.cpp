@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -202,6 +203,8 @@ namespace discraft::WorldRender
 
 		// Blocks mined out of Dishonored's world, per section (bit x + 16z + 256y).
 		std::map<std::tuple<int, int, int>, std::array<std::uint8_t, 512>> dug;
+		std::mutex                                                           newDugLock;
+		std::vector<std::array<int, 3>>                                      newDug;
 		bool stencilLogged = false;
 
 		void Handle(IDirect3DDevice9* a_device, std::uint32_t a_type, const std::uint8_t* a_data, std::uint32_t a_bytes)
@@ -277,7 +280,18 @@ namespace discraft::WorldRender
 						dug.erase(key);
 						return;
 					}
-					std::memcpy(dug[key].data(), a_data + sizeof(h), 512);
+					{
+						auto&       bits = dug[key];
+						const auto* incoming = a_data + sizeof(h);
+						std::lock_guard guard(newDugLock);
+						for (int i = 0; i < 4096; ++i) {
+							const std::uint8_t bit = static_cast<std::uint8_t>(1u << (i & 7));
+							if ((incoming[i >> 3] & bit) && !(bits[i >> 3] & bit) && newDug.size() < 4096) {
+								newDug.push_back({ h.sx * 16 + (i & 15), h.sy * 16 + (i >> 8), h.sz * 16 + ((i >> 4) & 15) });
+							}
+						}
+						std::memcpy(bits.data(), incoming, 512);
+					}
 					static int dugLogged = 0;
 					if (dugLogged++ < 10) {
 						DC_INFO("render: Minecraft dug %u block(s) out of section (%d, %d, %d)", h.count, h.sx, h.sy, h.sz);
@@ -622,6 +636,13 @@ namespace discraft::WorldRender
 		}
 	}
 
+	void TakeNewDug(std::vector<std::array<int, 3>>& a_out)
+	{
+		std::lock_guard guard(newDugLock);
+		a_out.insert(a_out.end(), newDug.begin(), newDug.end());
+		newDug.clear();
+	}
+
 	void Draw(IDirect3DDevice9* a_device, const CameraView& a_view, int a_width, int a_height, int a_depthMode)
 	{
 		if (!a_view.valid || !atlas.tex || a_width <= 0 || a_height <= 0) {
@@ -644,6 +665,12 @@ namespace discraft::WorldRender
 		if (useGame) {
 			gameDepth->GetDesc(&dsDesc);
 			useGame = dsDesc.Width >= bbDesc.Width && dsDesc.Height >= bbDesc.Height && dsDesc.MultiSampleType == bbDesc.MultiSampleType;
+		}
+		static bool depthLogged = false;
+		if (!depthLogged && a_depthMode != 0) {
+			depthLogged = true;
+			DC_INFO("render: game depth %s (back buffer %ux%u ms %d, depth %ux%u ms %d format %u)", useGame ? "used" : "NOT usable", bbDesc.Width, bbDesc.Height,
+				int(bbDesc.MultiSampleType), dsDesc.Width, dsDesc.Height, int(dsDesc.MultiSampleType), unsigned(dsDesc.Format));
 		}
 		IDirect3DSurface9* depth = useGame ? gameDepth : OwnDepth(a_device, bbDesc.Width, bbDesc.Height, bbDesc.MultiSampleType);
 		const bool         reversed = useGame && a_depthMode == 2;

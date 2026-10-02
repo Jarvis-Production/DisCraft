@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "WorldRender.h"
 
 #include "Bindings.h"
 #include "Config.h"
@@ -1192,6 +1193,12 @@ namespace discraft
 			stage = "actors and combat";
 			// Minecraft's health counts whenever it's in the world (walking or flying).
 			Actors::PerFrame(a_pc, pawn, puppet || following, delta);
+			stage = "breaking props";
+			{
+				std::vector<std::array<int, 3>> dugNow;
+				WorldRender::TakeNewDug(dugNow);
+				MeshWorld::BreakAt(dugNow);
+			}
 			stage = "collision";
 			if (settleTimer > 0.0f) {
 				settleTimer -= delta;

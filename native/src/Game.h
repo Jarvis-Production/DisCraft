@@ -5,10 +5,12 @@
 #include "Mesher.h"
 #include "ue3/UE3.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace discraft
 {
@@ -112,6 +114,9 @@ namespace discraft
 		bool        Ready();
 		void        Column(double a_x, double a_z, float a_yMin, float a_yMax, std::vector<mesher::Hit>& a_out);
 		std::string Summary();
+		// Minecraft dug these blocks (Minecraft coords): small props there break (hidden, no collision).
+		void BreakAt(const std::vector<std::array<int, 3>>& a_cells);
+		int  Generation();  // changes when props break
 	}
 
 	namespace Actors

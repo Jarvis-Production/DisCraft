@@ -57,6 +57,8 @@ namespace discraft::MeshWorld
 		Obj        smcClass = 0;
 		ue3::Field fMesh, fLocalToWorld, fBounds;
 		bool       enabled = true;
+		int        generation = 0;
+		bool       breakPending = false;
 		bool       ready = false;
 		ULONGLONG  builtAt = 0;
 		Vec3d      builtFor{ 1e9, 1e9, 1e9 };
@@ -386,6 +388,10 @@ namespace discraft::MeshWorld
 			builtFor = next.feet;
 			builtAt = ::GetTickCount64();
 			ready = !tris.empty();
+			if (breakPending) {
+				breakPending = false;
+				++generation;
+			}
 			static int logs = 0;
 			if (logs++ < 8) {
 				DC_INFO("mesh: %d of %zu nearby static meshes give %zu collision triangles (built over %llu ms, %zu meshes decoded)", meshesUsed, next.queue.size(),
@@ -438,6 +444,69 @@ namespace discraft::MeshWorld
 		ready = false;
 		builtAt = 0;
 		builtFor = { 1e9, 1e9, 1e9 };
+	}
+
+	int Generation()
+	{
+		return generation;
+	}
+
+	void BreakAt(const std::vector<std::array<int, 3>>& a_cells)
+	{
+		if (!enabled || a_cells.empty()) {
+			return;
+		}
+		if (components.empty()) {
+			ScanComponents();
+		}
+		const double upb = State().unitsPerBlock;
+		static const double maxRadius = config::Float("World", "fBreakableRadiusBlocks", 3.0f) * upb;
+		static const ue3::Field fields[] = { ue3::FindField(smcClass, "CollideActors"), ue3::FindField(smcClass, "BlockActors"),
+			ue3::FindField(smcClass, "BlockZeroExtent"), ue3::FindField(smcClass, "BlockNonZeroExtent"), ue3::FindField(smcClass, "BlockRigidBody") };
+		int broken = 0;
+		for (const auto& c : a_cells) {
+			const UeVector p = McToUe(c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, upb);
+			for (const Obj o : components) {
+				float b[7];
+				if (!ReadBytes(o + static_cast<std::uintptr_t>(fBounds.offset), sizeof(b), b) || !(b[6] > 1.0f) || b[6] > maxRadius) {
+					continue;
+				}
+				const float pad = static_cast<float>(upb * 0.5);
+				if (std::abs(p.x - b[0]) > b[3] + pad || std::abs(p.y - b[1]) > b[4] + pad || std::abs(p.z - b[2]) > b[5] + pad) {
+					continue;
+				}
+				if (ue3::GetBool(o, bind::F.hiddenGame)) {
+					continue;
+				}
+				// The whole prop goes: not drawn, nothing to bump into.
+				bool hid = false;
+				if (bind::Fn.setComponentHidden) {
+					ue3::Params h(bind::Fn.setComponentHidden);
+					h.SetBool("NewHidden", true);
+					hid = h.Invoke(o);
+				}
+				if (!hid || !ue3::GetBool(o, bind::F.hiddenGame)) {
+					ue3::SetBool(o, bind::F.hiddenGame, true);
+				}
+				for (const auto& f : fields) {
+					if (f) {
+						ue3::SetBool(o, f, false);
+					}
+				}
+				++broken;
+				static int logged = 0;
+				if (logged++ < 20) {
+					const Obj mesh = ue3::GetObj(o, fMesh);
+					DC_INFO("mesh: broke %s (%s) at block (%d, %d, %d)", ue3::NameOf(o).c_str(), mesh ? ue3::PathOf(mesh).c_str() : "?", c[0], c[1], c[2]);
+				}
+			}
+		}
+		if (broken) {
+			breakPending = true;  // generation moves when the rebuilt collision is swapped in
+			next = Building{};
+			builtAt = 0;  // rebuild collision without them
+			builtFor = { 1e9, 1e9, 1e9 };
+		}
 	}
 
 	void Column(double a_x, double a_z, float a_yMin, float a_yMax, std::vector<mesher::Hit>& a_out)

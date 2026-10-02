@@ -21,6 +21,12 @@ public abstract class EntityPickMixin {
 		at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/Level;clip(Lnet/minecraft/world/level/ClipContext;)Lnet/minecraft/world/phys/BlockHitResult;")
 	)
 	private BlockHitResult discraft$pickDishonored(Level level, ClipContext context, Operation<BlockHitResult> original) {
-		return DisClip.refine(context.getFrom(), context.getTo(), original.call(level, context), DisClip.Use.PICK);
+		BlockHitResult vanilla = original.call(level, context);
+		// A "block" that is only Dishonored's collision (air with a collision shape) isn't something to
+		// mine or build on: the Dishonored surface itself is.
+		if (vanilla.getType() != net.minecraft.world.phys.HitResult.Type.MISS && level.getBlockState(vanilla.getBlockPos()).isAir()) {
+			vanilla = BlockHitResult.miss(context.getTo(), net.minecraft.core.Direction.UP, net.minecraft.core.BlockPos.containing(context.getTo()));
+		}
+		return DisClip.refine(context.getFrom(), context.getTo(), vanilla, DisClip.Use.PICK);
 	}
 }
