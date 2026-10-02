@@ -62,6 +62,7 @@ namespace discraft
 		bool          haveLastSet = false;
 		bool          unitsFixed = false;
 		bool          wasPuppet = false;
+		bool          wasMenu = true;
 		std::int64_t  lastTickQpc = 0;
 
 		// What we changed on the pawn while Minecraft drives it (put back afterwards).
@@ -504,6 +505,17 @@ namespace discraft
 					haveLastSet = false;
 				}
 			}
+			// Back from a menu, a cutscene or F11: if the game's player is somewhere else now, Minecraft's
+			// player goes there (instead of the game's player being pulled back to Minecraft's).
+			if (wasMenu && !menu && pawn && haveMc) {
+				const auto   here = UeToMc({ pawnLoc.x, pawnLoc.y, pawnLoc.z - halfHeight }, st.unitsPerBlock);
+				const double gap = std::sqrt((here.x - mc.x) * (here.x - mc.x) + (here.y - mc.y) * (here.y - mc.y) + (here.z - mc.z) * (here.z - mc.z));
+				if (gap > 1.0) {
+					DC_INFO("back in control %.1f blocks from Minecraft's player; resyncing", gap);
+					teleportPending = true;
+				}
+			}
+			wasMenu = menu;
 			const auto pcRot = bind::Rotation(a_pc);
 			if (teleportPending && pawn && !paused) {
 				++teleportSeq;
@@ -615,7 +627,7 @@ namespace discraft
 				settleTimer -= delta;
 			} else if (pawn && mcAlive) {
 				// Urgent while Minecraft is waiting for the ground under it.
-				Collision::PerFrame(pawn, puppet ? Vec3d{ st.feetX, st.feetY, st.feetZ } : feet, arriving || !puppet);
+				Collision::PerFrame(pawn, puppet ? Vec3d{ st.feetX, st.feetY, st.feetZ } : feet, arriving);
 			}
 		}
 

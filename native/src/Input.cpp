@@ -131,8 +131,11 @@ namespace discraft::Input
 		bool       useRequested = false;
 		HWND       window = nullptr;
 		WNDPROC    originalProc = nullptr;
-		bool       legacyKeysSeen = false;
-		bool       legacyButtonsSeen = false;
+		// Keys and buttons come as window messages, unless the game asked Raw Input for none
+		// (RIDEV_NOLEGACY): then Raw Input is where they come from. Never both (no double presses).
+		bool       rawKeys = false;
+		bool       rawButtons = false;
+		ULONGLONG  rawFlagsCheckedMs = 0;
 		bool       registeredOwnRawInput = false;
 		ULONGLONG  routingSince = 0;
 		ULONGLONG  lastDeltaMs = 0;
@@ -303,7 +306,7 @@ namespace discraft::Input
 				if (!(m.usFlags & MOUSE_MOVE_ABSOLUTE) && Routing()) {
 					AddDelta(m.lLastX, m.lLastY, Source::kRaw);
 				}
-				if (!legacyButtonsSeen) {
+				if (rawButtons) {
 					const USHORT f = m.usButtonFlags;
 					if (f & RI_MOUSE_LEFT_BUTTON_DOWN) OnButton(1, true);
 					if (f & RI_MOUSE_LEFT_BUTTON_UP) OnButton(1, false);
@@ -315,13 +318,42 @@ namespace discraft::Input
 						Link::Get().PushInput(proto::kInScroll, 0, static_cast<SHORT>(m.usButtonData));
 					}
 				}
-			} else if (raw->header.dwType == RIM_TYPEKEYBOARD && !legacyKeysSeen) {
+			} else if (raw->header.dwType == RIM_TYPEKEYBOARD && rawKeys) {
 				const auto& k = raw->data.keyboard;
 				const UINT  scan = (k.MakeCode & 0x7F) | ((k.Flags & RI_KEY_E0) ? 0x80 : 0);
 				const bool  down = !(k.Flags & RI_KEY_BREAK);
 				const bool  repeat = down && heldScan[scan & 0xFF];
 				OnKey(k.VKey, scan, down, repeat);
 			}
+		}
+
+		// Which Raw Input registrations this process has (the game's, and ours if we added one).
+		void CheckRawRegistrations(bool& a_mouseRegistered)
+		{
+			a_mouseRegistered = false;
+			UINT count = 0;
+			::GetRegisteredRawInputDevices(nullptr, &count, sizeof(RAWINPUTDEVICE));
+			std::vector<RAWINPUTDEVICE> devices(count);
+			bool                        keys = false, buttons = false;
+			if (count && ::GetRegisteredRawInputDevices(devices.data(), &count, sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1)) {
+				for (const auto& d : devices) {
+					if (d.usUsagePage != 1) {
+						continue;
+					}
+					if (d.usUsage == 2) {
+						a_mouseRegistered = true;
+						buttons |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
+					} else if (d.usUsage == 6) {
+						keys |= (d.dwFlags & RIDEV_NOLEGACY) != 0;
+					}
+				}
+			}
+			if (keys != rawKeys || buttons != rawButtons) {
+				DC_INFO("input: keys from %s, mouse buttons from %s", keys ? "Raw Input" : "window messages", buttons ? "Raw Input" : "window messages");
+			}
+			rawKeys = keys;
+			rawButtons = buttons;
+			rawFlagsCheckedMs = ::GetTickCount64();
 		}
 
 		LRESULT CALLBACK WindowProc(HWND a_hwnd, UINT a_msg, WPARAM a_wParam, LPARAM a_lParam)
@@ -332,7 +364,6 @@ namespace discraft::Input
 			case WM_KEYUP:
 			case WM_SYSKEYUP:
 				{
-					legacyKeysSeen = true;
 					const bool down = a_msg == WM_KEYDOWN || a_msg == WM_SYSKEYDOWN;
 					const bool repeat = down && (a_lParam & (1 << 30));
 					if (a_wParam == VK_F4 && (::GetKeyState(VK_MENU) & 0x8000)) {
@@ -363,7 +394,6 @@ namespace discraft::Input
 			case WM_MBUTTONDBLCLK:
 			case WM_XBUTTONDBLCLK:
 				{
-					legacyButtonsSeen = true;
 					std::uint16_t button = 0;
 					bool          down = false;
 					switch (a_msg) {
@@ -601,20 +631,16 @@ namespace discraft::Input
 		}
 		// Routing for 2 s without a single mouse delta from anywhere: register Raw Input ourselves.
 		const ULONGLONG now = ::GetTickCount64();
+		bool            mouseRegistered = false;
+		if (now - rawFlagsCheckedMs > 2000) {
+			CheckRawRegistrations(mouseRegistered);
+		}
 		if (Routing()) {
 			if (!routingSince) {
 				routingSince = now;
 			}
 			if (!registeredOwnRawInput && window && now - routingSince > 2000 && now - lastDeltaMs > 2000) {
-				UINT count = 0;
-				::GetRegisteredRawInputDevices(nullptr, &count, sizeof(RAWINPUTDEVICE));
-				std::vector<RAWINPUTDEVICE> devices(count);
-				bool                        mouseRegistered = false;
-				if (count && ::GetRegisteredRawInputDevices(devices.data(), &count, sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1)) {
-					for (const auto& d : devices) {
-						mouseRegistered |= d.usUsagePage == 1 && d.usUsage == 2;
-					}
-				}
+				CheckRawRegistrations(mouseRegistered);
 				if (!mouseRegistered) {
 					RAWINPUTDEVICE mouse{ 1, 2, 0, window };
 					registeredOwnRawInput = ::RegisterRawInputDevices(&mouse, 1, sizeof(mouse)) != FALSE;
