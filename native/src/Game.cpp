@@ -654,13 +654,10 @@ namespace discraft
 		// this until it is found.
 		std::unordered_map<Obj, void*> probes;  // probed function -> its Func
 
-		void FindProcessEvent(Obj a_self, std::uintptr_t a_returnAddress)
+		// The vtable entry starting closest below a_returnAddress (within 8 KB), or -1.
+		int ClosestBelow(ue3::Obj a_object, std::uintptr_t a_returnAddress, std::uintptr_t& a_start)
 		{
-			if (ue3::ProcessEventIndex() > 0) {
-				processEventSearched = true;
-				return;
-			}
-			const auto     vtable = static_cast<std::uintptr_t>(mem::Read<ue3::Addr>(a_self));
+			const auto     vtable = static_cast<std::uintptr_t>(mem::Read<ue3::Addr>(a_object));
 			int            best = -1;
 			std::uintptr_t bestAddr = 0;
 			for (int i = 0; i < 300; ++i) {
@@ -676,16 +673,40 @@ namespace discraft
 					bestAddr = fn;
 				}
 			}
-			if (best > 0) {
+			a_start = bestAddr;
+			return best;
+		}
+
+		void FindProcessEvent(Obj a_self, std::uintptr_t a_returnAddress)
+		{
+			if (ue3::ProcessEventIndex() > 0) {
 				processEventSearched = true;
-				ue3::SetProcessEventIndex(best);
-				DC_INFO("UE3: ProcessEvent is vtable slot %d (0x%X) [returned to +0x%X from a native call on %s]", best, best * 4,
-					static_cast<unsigned>(a_returnAddress - bestAddr), ue3::FullNameOf(a_self).c_str());
+				return;
+			}
+			// Actors override ProcessEvent (AActor::ProcessEvent checks the world, then calls
+			// UObject::ProcessEvent directly), so the return address is in UObject::ProcessEvent,
+			// which an actor's vtable doesn't hold. A plain UObject's does: the object's class (a
+			// UClass) is one. The slot is the same in every vtable.
+			std::uintptr_t start = 0;
+			const Obj      plain = ue3::ClassOf(a_self);
+			int            slot = plain ? ClosestBelow(plain, a_returnAddress, start) : -1;
+			const char*    from = "its class";
+			if (slot <= 0) {
+				slot = ClosestBelow(a_self, a_returnAddress, start);
+				from = "the object itself";
+			}
+			if (slot > 0) {
+				processEventSearched = true;
+				ue3::SetProcessEventIndex(slot);
+				const auto own = static_cast<std::uintptr_t>(mem::Read<ue3::Addr>(static_cast<std::uintptr_t>(mem::Read<ue3::Addr>(a_self)) + 4u * slot));
+				DC_INFO("UE3: ProcessEvent is vtable slot %d (0x%X): returned to %s+0x%X, from a native call on %s (vtable of %s; this object's slot holds %s)",
+					slot, slot * 4, ue3::Where(start).c_str(), static_cast<unsigned>(a_returnAddress - start), ue3::FullNameOf(a_self).c_str(), from,
+					ue3::Where(own).c_str());
 			} else {
 				static bool warned = false;
 				if (!warned) {
 					warned = true;
-					DC_WARN("UE3: a native call didn't return into a virtual function; still looking for ProcessEvent");
+					DC_WARN("UE3: a native call didn't return into a virtual function (%s); still looking for ProcessEvent", ue3::Where(a_returnAddress).c_str());
 				}
 			}
 		}
