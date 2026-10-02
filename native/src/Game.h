@@ -97,6 +97,8 @@ namespace discraft
 		void Reset(std::uint32_t a_epoch);
 		// Game thread: traces part of the world around the player, sends finished regions.
 		void PerFrame(ue3::Obj a_pawn, const Vec3d& a_feet, bool a_urgent);
+		// "12 regions sent (3456 hits), 40 traces/frame" for the status log.
+		std::string Summary();
 	}
 
 	namespace Actors

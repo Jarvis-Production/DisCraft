@@ -18,11 +18,13 @@ namespace discraft::bind
 	struct Fields
 	{
 		// Actor
-		Field location, rotation, velocity, acceleration, physics, worldInfo, collideWorld, deleteMe, collisionComponent;
+		Field location, rotation, velocity, acceleration, physics, worldInfo, collideWorld, deleteMe, collisionComponent, owner, base, hidden;
 		// Pawn
 		Field pawnController, health, healthMax, cylinder, nextPawn, eyeHeight, baseEyeHeight, isCrouched;
 		// Controller / PlayerController
-		Field controllerPawn, enemy, playerCamera, cinematicMode, ignoreMoveInput, ignoreLookInput;
+		Field controllerPawn, enemy, playerCamera, cinematicMode, ignoreMoveInput, ignoreLookInput, myHud;
+		// HUD
+		Field showHud;
 		// Camera: CameraCache.POV.{Location, Rotation, FOV} as absolute offsets in the camera actor
 		int povLocation{ -1 }, povRotation{ -1 }, povFov{ -1 };
 		// WorldInfo
@@ -33,7 +35,7 @@ namespace discraft::bind
 
 	struct Functions
 	{
-		Obj setLocation{ 0 }, setRotation{ 0 }, setPhysics{ 0 }, trace{ 0 }, hurtRadius{ 0 }, died{ 0 };
+		Obj setLocation{ 0 }, setRotation{ 0 }, setPhysics{ 0 }, trace{ 0 }, hurtRadius{ 0 }, died{ 0 }, setHidden{ 0 };
 		int physFlying{ 4 }, physWalking{ 1 }, physNone{ 0 };
 	};
 

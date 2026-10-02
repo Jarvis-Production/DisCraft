@@ -73,6 +73,8 @@ namespace discraft
 		bool          wasPuppet = false;
 		bool          wasMenu = true;
 		std::int64_t  lastTickQpc = 0;
+		float         lookTravel = 0.0f;
+		ULONGLONG     statusLoggedAt = 0;
 
 		// What we changed on the pawn while Minecraft drives it (put back afterwards).
 		Obj          takenPawn = 0;
@@ -270,6 +272,113 @@ namespace discraft
 			DC_INFO("puppet: took over the player's pawn (%s); physics %u -> %d", ue3::NameOf(ue3::ClassOf(a_pawn)).c_str(), savedPhysics, Fn.physFlying);
 		}
 
+		// ---- the game's own player out of sight while Minecraft's is shown -------------------------
+		// The pawn (its body, first-person hands), everything it or the controller owns or carries
+		// (weapons, attachments) and the game's HUD. Put back as they were on release.
+		struct HiddenActor
+		{
+			Obj  actor;
+			bool wasHidden;
+		};
+		std::vector<HiddenActor> hiddenActors;
+		Obj                      hiddenHud = 0;
+		bool                     hudWasShown = true;
+		ULONGLONG                hideScanAt = 0;
+
+		void SetActorHidden(Obj a_actor, bool a_hidden)
+		{
+			if (Fn.setHidden) {
+				ue3::Params p(Fn.setHidden);
+				p.SetBool("bNewHidden", a_hidden);
+				if (p.Invoke(a_actor)) {
+					return;
+				}
+			}
+			ue3::SetBool(a_actor, F.hidden, a_hidden);
+		}
+
+		bool BelongsTo(Obj a_actor, Obj a_pawn, Obj a_pc)
+		{
+			for (const auto* link : { &F.owner, &F.base }) {
+				if (!*link) {
+					continue;
+				}
+				Obj o = a_actor;
+				for (int depth = 0; depth < 4 && o; ++depth) {
+					o = ue3::GetObj(o, *link);
+					if (o && (o == a_pawn || o == a_pc)) {
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
+		void HideGamePlayer(Obj a_pc, Obj a_pawn)
+		{
+			static const bool hidePlayer = config::Bool("Render", "bHideGamePlayer", true);
+			static const bool hideHud = config::Bool("Render", "bHideGameHud", true);
+			if (hideHud && F.myHud && F.showHud) {
+				const Obj hud = ue3::GetObj(a_pc, F.myHud);
+				if (hud && ue3::IsObject(hud)) {
+					if (hud != hiddenHud) {
+						hiddenHud = hud;
+						hudWasShown = ue3::GetBool(hud, F.showHud);
+					}
+					ue3::SetBool(hud, F.showHud, false);
+				}
+			}
+			const ULONGLONG now = ::GetTickCount64();
+			if (!hidePlayer || !F.hidden || now - hideScanAt < 2000) {
+				return;
+			}
+			hideScanAt = now;
+			auto hide = [&](Obj a_actor) {
+				for (const auto& h : hiddenActors) {
+					if (h.actor == a_actor) {
+						return;
+					}
+				}
+				const bool was = ue3::GetBool(a_actor, F.hidden);
+				hiddenActors.push_back({ a_actor, was });
+				if (!was) {
+					SetActorHidden(a_actor, true);
+					DC_DIAG("hid %s", ue3::FullNameOf(a_actor).c_str());
+				}
+			};
+			const std::size_t before = hiddenActors.size();
+			hide(a_pawn);
+			const int count = ue3::ObjectCount();
+			for (int i = 0; i < count; ++i) {
+				const Obj o = ue3::ObjectAt(i);
+				if (!o || o == a_pc || o == a_pawn || !ue3::IsA(o, C.actor) || ue3::IsA(o, C.controller) || (C.camera && ue3::IsA(o, C.camera)) ||
+					ue3::IsDefaultObject(o) || bind::IsDying(o)) {
+					continue;
+				}
+				if (BelongsTo(o, a_pawn, a_pc)) {
+					hide(o);
+				}
+			}
+			if (hiddenActors.size() != before) {
+				DC_INFO("hid the game's player: %zu actor(s) (pawn, hands, weapons, attachments)", hiddenActors.size());
+			}
+		}
+
+		void ShowGamePlayer()
+		{
+			for (const auto& h : hiddenActors) {
+				if (ue3::IsObject(h.actor) && !bind::IsDying(h.actor) && !h.wasHidden) {
+					SetActorHidden(h.actor, false);
+				}
+			}
+			hiddenActors.clear();
+			if (hiddenHud && ue3::IsObject(hiddenHud)) {
+				ue3::SetBool(hiddenHud, F.showHud, hudWasShown);
+			}
+			hiddenHud = 0;
+			hideScanAt = 0;
+		}
+
 		void Release(Obj a_pc)
 		{
 			if (!takenPawn) {
@@ -289,6 +398,7 @@ namespace discraft
 				SetPhysics(pawn, savedPhysics == Fn.physFlying ? Fn.physWalking : savedPhysics);
 				Actors::Release(pawn);
 			}
+			ShowGamePlayer();
 			DC_INFO("puppet: handed the player back to the game");
 		}
 
@@ -537,6 +647,7 @@ namespace discraft
 			// Mouse look (Minecraft's formula), integrated here so the camera has no added latency.
 			float dx = 0.0f, dy = 0.0f;
 			Input::ConsumeLook(dx, dy);
+			lookTravel += std::fabs(dx) + std::fabs(dy);
 			if (!st.lookInitialized) {
 				st.yaw = UeYawToMc(pcRot.yaw);
 				st.pitch = UePitchToMc(pcRot.pitch);
@@ -578,6 +689,8 @@ namespace discraft
 			if (puppet) {
 				const auto m = Interpolate(mc);
 				Puppet(a_pc, pawn, m, halfHeight);
+				stage = "hiding the game's player";
+				HideGamePlayer(a_pc, pawn);
 				st.feetX = m.feetX;
 				st.feetY = m.feetY;
 				st.feetZ = m.feetZ;
@@ -632,6 +745,18 @@ namespace discraft
 				}
 			}
 
+			// Every 10 s while Minecraft is connected: enough to tell from a log what each side thinks.
+			if (mcAlive && ::GetTickCount64() - statusLoggedAt > 10000) {
+				statusLoggedAt = ::GetTickCount64();
+				const auto gameFeet = UeToMc({ pawnLoc.x, pawnLoc.y, pawnLoc.z - halfHeight }, st.unitsPerBlock);
+				const auto rotNow = bind::Rotation(a_pc);
+				DC_INFO("status: puppet %d, arriving %d, menu %d, mc in world %d, screen %d | mouse %.0f | look %.1f/%.1f, controller %.1f/%.1f | "
+						"mc (%.2f, %.2f, %.2f) ack %u/%u, game feet (%.2f, %.2f, %.2f), physics %u | collision %s",
+					puppet, arriving, menu, st.mcInWorld.load(), st.mcScreenOpen.load(), lookTravel, st.yaw, st.pitch, UeYawToMc(rotNow.yaw),
+					UePitchToMc(rotNow.pitch), mc.x, mc.y, mc.z, mc.teleportAck, teleportSeq, gameFeet.x, gameFeet.y, gameFeet.z,
+					pawn ? ue3::Get<std::uint8_t>(pawn, F.physics) : 0u, Collision::Summary().c_str());
+				lookTravel = 0.0f;
+			}
 			stage = "camera";
 			SnapshotCamera(a_pc, pawn, halfHeight);
 			stage = "actors and combat";

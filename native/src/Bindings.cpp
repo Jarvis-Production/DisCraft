@@ -80,6 +80,9 @@ namespace discraft::bind
 		F.collideWorld = Want(C.actor, { "bCollideWorld" });
 		F.deleteMe = Want(C.actor, { "bDeleteMe" });
 		F.collisionComponent = Want(C.actor, { "CollisionComponent" });
+		F.owner = Want(C.actor, { "Owner" });
+		F.base = Want(C.actor, { "Base" });
+		F.hidden = Want(C.actor, { "bHidden" });
 
 		F.pawnController = Need(C.pawn, "Controller", ok);
 		F.health = Need(C.pawn, "Health", ok);
@@ -96,6 +99,10 @@ namespace discraft::bind
 		F.cinematicMode = Want(C.playerController, { "bCinematicMode" });
 		F.ignoreMoveInput = Want(C.playerController, { "bIgnoreMoveInput", "IgnoreMoveInput" });
 		F.ignoreLookInput = Want(C.playerController, { "bIgnoreLookInput", "IgnoreLookInput" });
+		F.myHud = Want(C.playerController, { "myHUD" });
+		if (const Obj hud = ue3::FindClass("Engine.HUD")) {
+			F.showHud = Want(hud, { "bShowHUD" });
+		}
 
 		if (C.camera) {
 			const auto cache = ue3::FindField(C.camera, "CameraCache");
@@ -131,6 +138,7 @@ namespace discraft::bind
 		Fn.trace = NeedFn(C.actor, "Trace", ok);
 		Fn.hurtRadius = ue3::FindFunction(C.actor, "HurtRadius");
 		Fn.died = ue3::FindFunction(C.pawn, "Died");
+		Fn.setHidden = ue3::FindFunction(C.actor, "SetHidden");
 		if (const Obj physics = ue3::FindObject("Enum", "Engine.Actor.EPhysics")) {
 			const int flying = ue3::EnumValue(physics, "PHYS_Flying");
 			const int walking = ue3::EnumValue(physics, "PHYS_Walking");

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <tuple>
@@ -80,6 +81,13 @@ namespace discraft::Collision
 			std::uint32_t traceActorsMask{ 1 };
 			bool ok{ false };
 		};
+		// For the log: what the traces find.
+		int                      regionsSent = 0;
+		long long                hitsTotal = 0;
+		long long                tracesTotal = 0;
+		int                      tracesLogged = 0;
+		int                      regionsLogged = 0;
+
 		TraceLayout              traceLayout;
 		std::vector<std::uint8_t> traceParms;
 
@@ -140,6 +148,13 @@ namespace discraft::Collision
 			out.hit = actor != 0;
 			std::memcpy(&out.location, p + traceLayout.hitLocation, 12);
 			std::memcpy(&out.normal, p + traceLayout.hitNormal, 12);
+			++tracesTotal;
+			if (tracesLogged < 6) {
+				++tracesLogged;
+				DC_INFO("collision: trace (%.0f, %.0f, %.0f) -> (%.0f, %.0f, %.0f): %s at (%.0f, %.0f, %.0f) normal (%.2f, %.2f, %.2f)", a_start.x, a_start.y,
+					a_start.z, a_end.x, a_end.y, a_end.z, out.hit ? ue3::FullNameOf(actor).c_str() : "nothing", out.location.x, out.location.y, out.location.z,
+					out.normal.x, out.normal.y, out.normal.z);
+			}
 			return out;
 		}
 
@@ -268,6 +283,12 @@ namespace discraft::Collision
 				static_cast<std::uint32_t>(out.size()) };
 			Queue(proto::kColRegion, &header, sizeof(header), out.data(), out.size() * sizeof(proto::ColBlock));
 			done[a_job.key] = { ::GetTickCount64(), a_job.cell };
+			++regionsSent;
+			if (regionsLogged < 8) {
+				++regionsLogged;
+				DC_INFO("collision: region (%d, %d) band %d, y %.0f..%.0f: %zu triangles, %zu voxel blocks (cell %.3f)", a_job.key.rx, a_job.key.rz,
+					a_job.key.band, g.yMin, g.yMax, tris.size(), out.size(), a_job.cell);
+			}
 			DC_DIAG("collision: region (%d, %d) band %d: %zu triangles, %zu blocks (cell %.3f)", a_job.key.rx, a_job.key.rz, a_job.key.band, tris.size(),
 				out.size(), a_job.cell);
 		}
@@ -363,6 +384,7 @@ namespace discraft::Collision
 				const int    i = job.cursor % g.nx, k = job.cursor / g.nx;
 				const double x = g.x0 + (i + 0.5) * g.cell, z = g.z0 + (k + 0.5) * g.cell;
 				TraceColumn(a_pawn, x, z, g.yMin, g.yMax, hits);
+				hitsTotal += static_cast<long long>(hits.size());
 				g.At(i, k) = mesher::IntervalsFromHits(hits, g.yMin, g.yMax, kThinSlab);
 				++job.cursor;
 				::QueryPerformanceCounter(&now);
@@ -378,5 +400,13 @@ namespace discraft::Collision
 				return;
 			}
 		}
+	}
+
+	std::string Summary()
+	{
+		char buf[160];
+		std::snprintf(buf, sizeof(buf), "%d regions sent, %lld traces, %lld surfaces, outbox %zu%s", regionsSent, tracesTotal, hitsTotal, outbox.size(),
+			traceLayout.ok ? "" : " (Trace missing)");
+		return buf;
 	}
 }
