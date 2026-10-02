@@ -1077,6 +1077,8 @@ namespace discraft::ue3
 		constexpr std::uint8_t  kExEndFunctionParms = 0x16;
 		constexpr std::uint64_t kCpfParm = 0x80;
 		constexpr std::uint64_t kCpfReturnParm = 0x400;
+		constexpr std::uint64_t kCpfOptionalParm = 0x10;
+		constexpr std::uint64_t kCpfOutParm = 0x100;
 
 		std::array<std::uint8_t, 0x100> frameTemplate{};
 		bool                            haveFrameTemplate = false;
@@ -1109,6 +1111,7 @@ namespace discraft::ue3
 			struct NativeInfo
 			{
 				std::vector<std::pair<int, Obj>> ordered;  // (offset, property), in offset order
+				std::vector<int>                 mustPass;  // offsets of out and non-optional parameters
 				int                              returnOffset{ -1 };
 				bool                             flagsKnown{ false };
 				std::string                      activity;  // for the crash log
@@ -1149,6 +1152,12 @@ namespace discraft::ue3
 						info.returnOffset = offset;
 					} else if (!info.flagsKnown || (p.flags & kCpfParm)) {
 						info.ordered.emplace_back(offset, p.prop);
+						// An out parameter left out reaches the native as a null address it writes
+						// through (Trace's and TakeDamage's HitInfo faulted that way); a required one
+						// has no default. Both are always passed (zeroed if the caller didn't set them).
+						if (info.flagsKnown && ((p.flags & kCpfOutParm) || !(p.flags & kCpfOptionalParm))) {
+							info.mustPass.push_back(offset);
+						}
 					}
 				}
 				std::sort(info.ordered.begin(), info.ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -1173,7 +1182,11 @@ namespace discraft::ue3
 			static std::vector<std::uint8_t> code;  // game thread only
 			code.clear();
 			std::size_t passed = 0;
-			const auto leftOut = [&](int a_offset) { return a_passed && std::find(a_passed->begin(), a_passed->end(), a_offset) == a_passed->end(); };
+			const auto& mustPass = it->second.mustPass;
+			const auto  leftOut = [&](int a_offset) {
+                return a_passed && std::find(a_passed->begin(), a_passed->end(), a_offset) == a_passed->end() &&
+                       std::find(mustPass.begin(), mustPass.end(), a_offset) == mustPass.end();
+			};
 			for (const auto& [offset, prop] : ordered) {
 				if (leftOut(offset)) {
 					code.push_back(kExNothing);

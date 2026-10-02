@@ -143,7 +143,7 @@ namespace discraft::Collision
 			}
 			// Trace faults in this game (and a fault taken back still leaves the engine unsettled), and
 			// zero-width lines pass through its floors: FastTrace with a small box is the default.
-			fastMode = !config::Bool("World", "bUseTrace", false);
+			fastMode = !config::Bool("World", "bUseTrace", true);
 			bulletTrace = config::Bool("World", "bTraceComplex", true);
 			boxExtent = std::clamp(static_cast<double>(config::Float("World", "fTraceBoxExtent", 2.0f)), 0.0, 20.0);
 			if (Fn.fastTrace) {
@@ -186,8 +186,18 @@ namespace discraft::Collision
 				const std::uint32_t v = withActors ? traceLayout.traceActorsMask : 0u;
 				std::memcpy(p + traceLayout.traceActors, &v, 4);
 			}
-			// Every parameter but HitInfo (asking for it makes the trace look up surface materials);
-			// Extent and ExtraTraceFlags are passed as zero.
+			// A small box (floors here block boxes, not zero-width lines) and per-polygon collision
+			// (TRACEFLAG_Bullet). HitInfo is passed too (zeroed): left out, the engine wrote through a
+			// null address on every hit.
+			if (traceLayout.extent >= 0) {
+				const auto     b = static_cast<float>(boxExtent);
+				const UeVector e{ b, b, b };
+				std::memcpy(p + traceLayout.extent, &e, 12);
+			}
+			if (traceLayout.extraFlags >= 0) {
+				const std::int32_t flags = bulletTrace ? 1 : 0;
+				std::memcpy(p + traceLayout.extraFlags, &flags, 4);
+			}
 			if (!ue3::CallFunction(a_pawn, Fn.trace, p, &traceLayout.passed)) {
 				if (++traceFailures >= 3 && !fastMode && fastLayout.ok) {
 					fastMode = true;

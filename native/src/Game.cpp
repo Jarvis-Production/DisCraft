@@ -639,7 +639,7 @@ namespace discraft
 			fastTest("eye down", eye, below, 2.0f, true);
 			fastTest("from high above", above, below, 2.0f, true);
 			fastTest("from high above", above, below, 40.0f, true);
-			if (!config::Bool("World", "bUseTrace", false)) {
+			if (!config::Bool("World", "bUseTrace", true)) {
 				return;  // Trace faults in this game; it isn't used
 			}
 			// World geometry only first (what collision uses); with actors last: a fault turns Trace
