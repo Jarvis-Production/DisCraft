@@ -965,7 +965,8 @@ namespace discraft
 				DC_INFO("puppet %s", puppet ? "on (Minecraft drives the player)" : "off");
 			}
 			st.puppeting = puppet;
-			st.routeInput = !gameDrives && (puppet || arriving);
+			// A Minecraft screen (inventory, chat, menu) takes every key and the cursor while it's open.
+			st.routeInput = gameDrives ? (following && st.mcScreenOpen) : (puppet || arriving);
 			st.mcCrosshair = puppet && mc.cameraMode == 0 && !st.mcScreenOpen;
 			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
 

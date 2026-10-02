@@ -137,7 +137,9 @@ namespace discraft::Launcher
 			if (std::ifstream in{ dir / "bundle.stamp" }; in) {
 				std::getline(in, installed);
 			}
-			if (installed == stamp && std::filesystem::exists(prism)) {
+			// The DisCraft instance deleted in Prism (it then opens empty): unpack it again.
+			const bool haveInstance = std::filesystem::exists(dir / "Prism" / "instances" / "DisCraft" / "instance.cfg");
+			if (installed == stamp && std::filesystem::exists(prism) && haveInstance) {
 				return prism;
 			}
 			DC_INFO("Minecraft: unpacking DisCraft's Minecraft to %s", dir.string().c_str());

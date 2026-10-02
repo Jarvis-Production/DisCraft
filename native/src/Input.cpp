@@ -66,6 +66,8 @@ namespace discraft::Input
 			UINT              toggle{ VK_F11 };
 			UINT              depthMode{ VK_F10 };
 			std::vector<bool> gameScan = std::vector<bool>(256, false);  // the same keys as scan codes (DirectInput)
+			std::vector<UINT> mc;    // bGameDrives: keys that go to Minecraft only
+			std::vector<bool> mcScan = std::vector<bool>(256, false);
 		};
 		Keys keys;
 
@@ -97,7 +99,7 @@ namespace discraft::Input
 				{ "enter", VK_RETURN }, { "return", VK_RETURN }, { "backspace", VK_BACK }, { "insert", VK_INSERT }, { "delete", VK_DELETE },
 				{ "home", VK_HOME }, { "end", VK_END }, { "pageup", VK_PRIOR }, { "pagedown", VK_NEXT }, { "up", VK_UP }, { "down", VK_DOWN },
 				{ "left", VK_LEFT }, { "right", VK_RIGHT }, { "shift", VK_SHIFT }, { "ctrl", VK_CONTROL }, { "control", VK_CONTROL },
-				{ "alt", VK_MENU }, { "tilde", VK_OEM_3 }, { "grave", VK_OEM_3 }, { "pause", VK_PAUSE }, { "capslock", VK_CAPITAL } };
+				{ "alt", VK_MENU }, { "slash", VK_OEM_2 }, { "/", VK_OEM_2 }, { "tilde", VK_OEM_3 }, { "grave", VK_OEM_3 }, { "pause", VK_PAUSE }, { "capslock", VK_CAPITAL } };
 			if (const auto it = named.find(a_name); it != named.end()) {
 				return it->second;
 			}
@@ -117,12 +119,23 @@ namespace discraft::Input
 					}
 				}
 			}
+			keys.mc.clear();
+			for (const auto& name : config::List("Controls", "sMinecraftKeys", "E,Q,T,Slash,F1,F3,F4,F5,1,2,3,4,5,6,7,8,9,O")) {
+				if (const UINT vk = ParseKey(name)) {
+					keys.mc.push_back(vk);
+					const UINT sc = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+					if (sc < 256) {
+						keys.mcScan[sc] = true;
+					}
+				}
+			}
 			keys.activate = ParseKey(config::String("Controls", "sActivateKey", "G"));
 			keys.minecraftMenu = ParseKey(config::String("Controls", "sMinecraftMenuKey", "O"));
 			keys.toggle = ParseKey(config::String("Controls", "sToggleKey", "F11"));
 			keys.depthMode = ParseKey(config::String("Controls", "sDepthModeKey", "F10"));
 		}
 
+		bool IsMcKey(UINT a_vk) { return std::find(keys.mc.begin(), keys.mc.end(), a_vk) != keys.mc.end(); }
 		bool IsGameKey(UINT a_vk) { return std::find(keys.game.begin(), keys.game.end(), a_vk) != keys.game.end(); }
 
 		// ---- state ---------------------------------------------------------------------------------
@@ -236,7 +249,13 @@ namespace discraft::Input
 				return st.installed;
 			}
 			if (!Routing()) {
-				if (Mirroring() && a_vk >= '1' && a_vk <= '9') {
+				if (Mirroring() && IsMcKey(a_vk)) {
+					if (a_vk == keys.minecraftMenu && keys.minecraftMenu) {
+						if (a_down && !a_repeat) {
+							Link::Get().PushInput(proto::kInOpenMenu, 0);
+						}
+						return true;
+					}
 					SendKey(a_scan, a_down);
 					return true;
 				}
@@ -284,6 +303,11 @@ namespace discraft::Input
 					return true;
 				}
 				buttonDown[a_sdlButton] = a_down;
+			}
+			static bool loggedClick = false;
+			if (!loggedClick && a_down) {
+				loggedClick = true;
+				DC_INFO("input: first mouse button to Minecraft (%u, %s)", a_sdlButton, Routing() ? "routed" : "mirrored");
 			}
 			Link::Get().PushInput(proto::kInMouseButton, a_sdlButton, a_down ? 1 : 0);
 			return true;
@@ -534,6 +558,14 @@ namespace discraft::Input
 			}
 			if (!routing) {
 				// Mirroring: the game keeps the mouse movement, its buttons go to Minecraft only.
+				if (type == DI8DEVTYPE_KEYBOARD && a_size == 256) {
+					auto* bytes = static_cast<std::uint8_t*>(a_data);
+					for (int k = 0; k < 256; ++k) {
+						if (keys.mcScan[static_cast<std::size_t>(k)]) {
+							bytes[k] = 0;
+						}
+					}
+				}
 				if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
 					auto* ms = static_cast<DIMOUSESTATE*>(a_data);
 					static constexpr std::uint16_t kSdl[4] = { 1, 3, 2, 4 };
@@ -576,6 +608,21 @@ namespace discraft::Input
 				{
 					std::lock_guard guard(diLock);
 					mtype = DeviceType(a_device, v);
+				}
+				if (mtype == DI8DEVTYPE_KEYBOARD) {
+					DWORD kept = 0;
+					auto* bytes = reinterpret_cast<std::uint8_t*>(a_data);
+					for (DWORD i = 0; i < *a_inOut; ++i) {
+						const auto* e = reinterpret_cast<const DIDEVICEOBJECTDATA*>(bytes + std::size_t(i) * a_size);
+						if (e->dwOfs < 256 && keys.mcScan[e->dwOfs]) {
+							continue;
+						}
+						if (kept != i) {
+							std::memmove(bytes + std::size_t(kept) * a_size, e, a_size);
+						}
+						++kept;
+					}
+					*a_inOut = kept;
 				}
 				if (mtype == DI8DEVTYPE_MOUSE) {
 					DWORD kept = 0;
