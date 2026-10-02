@@ -11,6 +11,8 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 #include <unordered_map>
 
@@ -273,33 +275,54 @@ namespace discraft
 		}
 
 		// ---- the game's own player out of sight while Minecraft's is shown -------------------------
-		// The pawn (its body, first-person hands), everything it or the controller owns or carries
-		// (weapons, attachments) and the game's HUD. Put back as they were on release.
+		// The pawn (its body, first-person hands), everything it or the controller owns, carries or
+		// instigated (weapons, attachments) and the game's HUD; and the visible components of all
+		// of those (first-person meshes may ignore their owner's bHidden). Put back as they were on
+		// release.
 		struct HiddenActor
 		{
 			Obj  actor;
 			bool wasHidden;
 		};
-		std::vector<HiddenActor> hiddenActors;
-		Obj                      hiddenHud = 0;
-		bool                     hudWasShown = true;
-		ULONGLONG                hideScanAt = 0;
+		struct HiddenComponent
+		{
+			Obj  component;
+			bool wasHidden;
+		};
+		std::vector<HiddenActor>     hiddenActors;
+		std::vector<HiddenComponent> hiddenComponents;
+		Obj                          hiddenHud = 0;
+		bool                         hudWasShown = true;
+		ULONGLONG                    hideScanAt = 0;
+		bool                         nearbyLogged = false;
 
 		void SetActorHidden(Obj a_actor, bool a_hidden)
 		{
 			if (Fn.setHidden) {
 				ue3::Params p(Fn.setHidden);
 				p.SetBool("bNewHidden", a_hidden);
-				if (p.Invoke(a_actor)) {
+				if (p.Invoke(a_actor) && ue3::GetBool(a_actor, F.hidden) == a_hidden) {
 					return;
 				}
 			}
 			ue3::SetBool(a_actor, F.hidden, a_hidden);
 		}
 
+		void SetComponentHidden(Obj a_component, bool a_hidden)
+		{
+			if (Fn.setComponentHidden) {
+				ue3::Params p(Fn.setComponentHidden);
+				p.SetBool("NewHidden", a_hidden);
+				if (p.Invoke(a_component) && ue3::GetBool(a_component, F.hiddenGame) == a_hidden) {
+					return;
+				}
+			}
+			ue3::SetBool(a_component, F.hiddenGame, a_hidden);
+		}
+
 		bool BelongsTo(Obj a_actor, Obj a_pawn, Obj a_pc)
 		{
-			for (const auto* link : { &F.owner, &F.base }) {
+			for (const auto* link : { &F.owner, &F.base, &F.instigator }) {
 				if (!*link) {
 					continue;
 				}
@@ -312,6 +335,32 @@ namespace discraft
 				}
 			}
 			return false;
+		}
+
+		std::string Who(Obj a_actor) { return a_actor ? ue3::NameOf(ue3::ClassOf(a_actor)) + " " + ue3::NameOf(a_actor) : "none"; }
+
+		void HideComponentsOf(Obj a_actor)
+		{
+			if (!C.primitive || !F.components || !F.hiddenGame) {
+				return;
+			}
+			for (const Obj c : ue3::ObjectArray(a_actor, F.components)) {
+				if (!ue3::IsA(c, C.primitive)) {
+					continue;
+				}
+				bool known = false;
+				for (const auto& h : hiddenComponents) {
+					known = known || h.component == c;
+				}
+				if (known) {
+					continue;
+				}
+				const bool was = ue3::GetBool(c, F.hiddenGame);
+				hiddenComponents.push_back({ c, was });
+				if (!was) {
+					SetComponentHidden(c, true);
+				}
+			}
 		}
 
 		void HideGamePlayer(Obj a_pc, Obj a_pawn)
@@ -333,6 +382,7 @@ namespace discraft
 				return;
 			}
 			hideScanAt = now;
+			const std::size_t before = hiddenActors.size();
 			auto hide = [&](Obj a_actor) {
 				for (const auto& h : hiddenActors) {
 					if (h.actor == a_actor) {
@@ -343,12 +393,15 @@ namespace discraft
 				hiddenActors.push_back({ a_actor, was });
 				if (!was) {
 					SetActorHidden(a_actor, true);
-					DC_DIAG("hid %s", ue3::FullNameOf(a_actor).c_str());
 				}
+				HideComponentsOf(a_actor);
+				DC_INFO("hid %s (owner %s, base %s): bHidden %d -> %d, %zu components hidden so far", Who(a_actor).c_str(),
+					Who(ue3::GetObj(a_actor, F.owner)).c_str(), Who(ue3::GetObj(a_actor, F.base)).c_str(), was, ue3::GetBool(a_actor, F.hidden),
+					hiddenComponents.size());
 			};
-			const std::size_t before = hiddenActors.size();
 			hide(a_pawn);
-			const int count = ue3::ObjectCount();
+			const auto pawnLoc = bind::Location(a_pawn);
+			const int  count = ue3::ObjectCount();
 			for (int i = 0; i < count; ++i) {
 				const Obj o = ue3::ObjectAt(i);
 				if (!o || o == a_pc || o == a_pawn || !ue3::IsA(o, C.actor) || ue3::IsA(o, C.controller) || (C.camera && ue3::IsA(o, C.camera)) ||
@@ -357,15 +410,33 @@ namespace discraft
 				}
 				if (BelongsTo(o, a_pawn, a_pc)) {
 					hide(o);
+					continue;
+				}
+				// Once: what else is right around the player (the first-person rig, if it isn't
+				// linked to the pawn), for the log.
+				if (!nearbyLogged && !ue3::GetBool(o, F.isStatic) && !ue3::IsA(o, C.pawn)) {
+					const auto   loc = bind::Location(o);
+					const double dx = loc.x - pawnLoc.x, dy = loc.y - pawnLoc.y, dz = loc.z - pawnLoc.z;
+					if (dx * dx + dy * dy + dz * dz < 300.0 * 300.0) {
+						DC_INFO("near the player: %s (owner %s, base %s, hidden %d)", Who(o).c_str(), Who(ue3::GetObj(o, F.owner)).c_str(),
+							Who(ue3::GetObj(o, F.base)).c_str(), ue3::GetBool(o, F.hidden));
+					}
 				}
 			}
+			nearbyLogged = true;
 			if (hiddenActors.size() != before) {
-				DC_INFO("hid the game's player: %zu actor(s) (pawn, hands, weapons, attachments)", hiddenActors.size());
+				DC_INFO("hid the game's player: %zu actor(s), %zu component(s)", hiddenActors.size(), hiddenComponents.size());
 			}
 		}
 
 		void ShowGamePlayer()
 		{
+			for (const auto& h : hiddenComponents) {
+				if (ue3::IsObject(h.component) && !h.wasHidden) {
+					SetComponentHidden(h.component, false);
+				}
+			}
+			hiddenComponents.clear();
 			for (const auto& h : hiddenActors) {
 				if (ue3::IsObject(h.actor) && !bind::IsDying(h.actor) && !h.wasHidden) {
 					SetActorHidden(h.actor, false);
@@ -377,6 +448,112 @@ namespace discraft
 			}
 			hiddenHud = 0;
 			hideScanAt = 0;
+		}
+
+		// ---- self-test: do engine calls work, and what does Trace see? ----------------------------
+		// Logged a few times (first in a level, then after the player has moved far): VSize((3,4,0))
+		// must give 5, and a set of traces from the player with sentinels in every output, so the
+		// log shows whether the native wrote anything at all.
+		std::string Vec(const UeVector& a_v)
+		{
+			char b[96];
+			std::snprintf(b, sizeof(b), "(%.1f, %.1f, %.1f)", a_v.x, a_v.y, a_v.z);
+			return b;
+		}
+
+		void TestTrace(const char* a_label, Obj a_pawn, const UeVector& a_start, const UeVector& a_end, bool a_actors, float a_extent)
+		{
+			const Obj fn = Fn.trace;
+			if (!fn) {
+				return;
+			}
+			std::vector<std::uint8_t> b(static_cast<std::size_t>(std::max(ue3::StructSize(fn), 0)) + 32, 0);
+			std::vector<int>          passed;
+			const auto                put = [&](const char* a_name, const void* a_value, std::size_t a_size) {
+                const auto f = ue3::FindField(fn, a_name);
+                if (f && f.offset + static_cast<int>(a_size) <= static_cast<int>(b.size())) {
+                    std::memcpy(b.data() + f.offset, a_value, a_size);
+                    passed.push_back(f.offset);
+                }
+                return f;
+			};
+			const UeVector sentinel{ 1234.5f, 1234.5f, 1234.5f };
+			const auto     hitLocation = put("HitLocation", &sentinel, 12);
+			const auto     hitNormal = put("HitNormal", &sentinel, 12);
+			put("TraceEnd", &a_end, 12);
+			put("TraceStart", &a_start, 12);
+			const auto          actorsField = ue3::FindField(fn, "bTraceActors");
+			const std::uint32_t actors = a_actors ? (actorsField.mask ? actorsField.mask : 1u) : 0u;
+			put("bTraceActors", &actors, 4);
+			const UeVector extent{ a_extent, a_extent, a_extent };
+			put("Extent", &extent, 12);
+			const std::int32_t flags = 0;
+			put("ExtraTraceFlags", &flags, 4);
+			const auto          ret = ue3::FindField(fn, "ReturnValue");
+			const std::uint32_t mark = 0xDEADBEEF;
+			if (ret) {
+				std::memcpy(b.data() + ret.offset, &mark, 4);
+			}
+			const bool    called = ue3::CallFunction(a_pawn, fn, b.data(), &passed);
+			std::uint32_t got = 0;
+			UeVector      loc{}, normal{};
+			if (ret) {
+				std::memcpy(&got, b.data() + ret.offset, 4);
+			}
+			std::memcpy(&loc, b.data() + hitLocation.offset, 12);
+			std::memcpy(&normal, b.data() + hitNormal.offset, 12);
+			DC_INFO("self-test %s: %s -> %s, actors %d, extent %.0f: call %s, returned %08X%s%s, HitLocation %s, HitNormal %s", a_label, Vec(a_start).c_str(),
+				Vec(a_end).c_str(), a_actors, a_extent, called ? "ok" : "FAILED", got, got && got != mark ? " = " : "",
+				got && got != mark && ue3::IsObject(got) ? ue3::FullNameOf(got).c_str() : "", Vec(loc).c_str(), Vec(normal).c_str());
+		}
+
+		void SelfTest(Obj a_pc, Obj a_pawn, const bind::Vec3f& a_loc, float a_halfHeight)
+		{
+			static int      runs = 0;
+			static UeVector lastAt{};
+			const UeVector  at{ a_loc.x, a_loc.y, a_loc.z };
+			const double    moved = std::sqrt(double(at.x - lastAt.x) * (at.x - lastAt.x) + double(at.y - lastAt.y) * (at.y - lastAt.y) +
+                double(at.z - lastAt.z) * (at.z - lastAt.z));
+			if (runs >= 3 || (runs > 0 && moved < 2000.0) || ue3::ProcessEventIndex() <= 0) {
+				return;
+			}
+			++runs;
+			lastAt = at;
+			if (Fn.vsize) {
+				ue3::Params p(Fn.vsize);
+				p.Set("A", UeVector{ 3.0f, 4.0f, 0.0f });
+				const float before = -1.0f;
+				const auto  ret = ue3::FindField(Fn.vsize, "ReturnValue");
+				if (ret) {
+					std::memcpy(p.Data() + ret.offset, &before, 4);
+				}
+				const bool called = p.Invoke(a_pawn);
+				DC_INFO("self-test VSize((3, 4, 0)): call %s, returned %.3f (5 is right)", called ? "ok" : "FAILED", p.Get<float>("ReturnValue"));
+			}
+			const UeVector eye{ at.x, at.y, at.z + a_halfHeight * 0.5f };
+			const UeVector below{ at.x, at.y, at.z - 1000.0f };
+			TestTrace("down", a_pawn, eye, below, true, 0.0f);
+			TestTrace("down, world only", a_pawn, eye, below, false, 0.0f);
+			TestTrace("down, extent 10", a_pawn, eye, below, true, 10.0f);
+			TestTrace("from high above", a_pawn, UeVector{ at.x, at.y, at.z + 3000.0f }, below, true, 0.0f);
+			const auto   rot = bind::Rotation(a_pc);
+			const double yaw = rot.yaw * (6.283185307179586 / 65536.0);
+			TestTrace("forward", a_pawn, eye, UeVector{ at.x + float(std::cos(yaw) * 3000.0), at.y + float(std::sin(yaw) * 3000.0), eye.z }, true, 0.0f);
+			if (Fn.fastTrace) {
+				ue3::Params p(Fn.fastTrace);
+				p.Set("TraceEnd", below).Set("TraceStart", eye).Set("BoxExtent", UeVector{}).SetBool("bTraceBullet", false);
+				const auto          ret = ue3::FindField(Fn.fastTrace, "ReturnValue");
+				const std::uint32_t mark = 0xDEADBEEF;
+				if (ret) {
+					std::memcpy(p.Data() + ret.offset, &mark, 4);
+				}
+				const bool    called = p.Invoke(a_pawn);
+				std::uint32_t got = 0;
+				if (ret) {
+					std::memcpy(&got, p.Data() + ret.offset, 4);
+				}
+				DC_INFO("self-test FastTrace down: call %s, returned %08X (0: blocked, nonzero: clear)", called ? "ok" : "FAILED", got);
+			}
 		}
 
 		void Release(Obj a_pc)
@@ -635,6 +812,10 @@ namespace discraft
 				}
 			}
 			wasMenu = menu;
+			if (pawn && !menu) {
+				stage = "self-test";
+				SelfTest(a_pc, pawn, pawnLoc, halfHeight);
+			}
 			const auto pcRot = bind::Rotation(a_pc);
 			if (teleportPending && pawn && !paused) {
 				++teleportSeq;

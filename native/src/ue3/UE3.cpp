@@ -1004,6 +1004,24 @@ namespace discraft::ue3
 		return out;
 	}
 
+	std::vector<Obj> ObjectArray(Obj a_object, const Field& a_field)
+	{
+		std::vector<Obj> out;
+		if (!a_object || !a_field || !Ok(a_object + static_cast<std::uintptr_t>(a_field.offset), 12)) {
+			return out;
+		}
+		const auto h = ReadArray(a_object + static_cast<std::uintptr_t>(a_field.offset));
+		if (h.num <= 0 || h.num > 4096 || h.num > h.max || !Ok(h.data, static_cast<std::size_t>(h.num) * 4)) {
+			return out;
+		}
+		for (int i = 0; i < h.num; ++i) {
+			if (const Obj o = Rd<Addr>(h.data + static_cast<std::uintptr_t>(i) * 4); IsObject(o)) {
+				out.push_back(o);
+			}
+		}
+		return out;
+	}
+
 	bool GetBool(Obj a_object, const Field& a_field)
 	{
 		return a_object && a_field && (Rd<std::uint32_t>(a_object + a_field.offset) & (a_field.mask ? a_field.mask : 1u)) != 0;

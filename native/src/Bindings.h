@@ -12,19 +12,22 @@ namespace discraft::bind
 
 	struct Classes
 	{
-		Obj actor{ 0 }, pawn{ 0 }, controller{ 0 }, playerController{ 0 }, camera{ 0 }, worldInfo{ 0 }, cylinder{ 0 }, damageType{ 0 };
+		Obj actor{ 0 }, pawn{ 0 }, controller{ 0 }, playerController{ 0 }, camera{ 0 }, worldInfo{ 0 }, cylinder{ 0 }, damageType{ 0 }, primitive{ 0 }, hud{ 0 };
 	};
 
 	struct Fields
 	{
 		// Actor
-		Field location, rotation, velocity, acceleration, physics, worldInfo, collideWorld, deleteMe, collisionComponent, owner, base, hidden;
+		Field location, rotation, velocity, acceleration, physics, worldInfo, collideWorld, deleteMe, collisionComponent, owner, base, hidden, instigator,
+			components, isStatic;
 		// Pawn
 		Field pawnController, health, healthMax, cylinder, nextPawn, eyeHeight, baseEyeHeight, isCrouched;
 		// Controller / PlayerController
 		Field controllerPawn, enemy, playerCamera, cinematicMode, ignoreMoveInput, ignoreLookInput, myHud;
 		// HUD
 		Field showHud;
+		// PrimitiveComponent
+		Field hiddenGame;
 		// Camera: CameraCache.POV.{Location, Rotation, FOV} as absolute offsets in the camera actor
 		int povLocation{ -1 }, povRotation{ -1 }, povFov{ -1 };
 		// WorldInfo
@@ -35,7 +38,8 @@ namespace discraft::bind
 
 	struct Functions
 	{
-		Obj setLocation{ 0 }, setRotation{ 0 }, setPhysics{ 0 }, trace{ 0 }, hurtRadius{ 0 }, died{ 0 }, setHidden{ 0 };
+		Obj setLocation{ 0 }, setRotation{ 0 }, setPhysics{ 0 }, trace{ 0 }, hurtRadius{ 0 }, died{ 0 }, setHidden{ 0 }, setComponentHidden{ 0 }, fastTrace{ 0 },
+			vsize{ 0 };
 		int physFlying{ 4 }, physWalking{ 1 }, physNone{ 0 };
 	};
 

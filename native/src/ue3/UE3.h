@@ -147,6 +147,8 @@ namespace discraft::ue3
 	std::vector<Obj> FunctionsNamed(std::string_view a_name);
 	// A struct's own fields and functions (not its super's), in declaration order.
 	std::vector<Obj> ChildrenOf(Obj a_struct);
+	// The objects in a TArray<UObject*> property of an object (empty if it doesn't look like one).
+	std::vector<Obj> ObjectArray(Obj a_object, const Field& a_field);
 
 	template <class T>
 	T Get(Obj a_object, const Field& a_field)
