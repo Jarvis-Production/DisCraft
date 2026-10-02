@@ -527,6 +527,100 @@ namespace discraft
 			hideScanAt = 0;
 		}
 
+		// ---- geometry probe: where the level's meshes live (one-off, for the log) -------------------
+		// Trace and FastTrace don't see this game's floors, so the world's shape has to come from the
+		// meshes themselves (as SkyCraft reads Skyrim's). This logs what the reflection says about them
+		// and the raw memory of the nearest ones, to work out the layout from.
+		std::string Hex(Obj a_addr, int a_bytes)
+		{
+			std::string out;
+			char        b[4];
+			for (int i = 0; i < a_bytes; i += 4) {
+				std::uint32_t v = 0;
+				if (!mem::TryRead(a_addr + static_cast<std::uintptr_t>(i), v)) {
+					out += "?? ";
+					continue;
+				}
+				char w[12];
+				std::snprintf(w, sizeof(w), "%08X ", v);
+				out += w;
+				(void)b;
+			}
+			return out;
+		}
+
+		void DescribeClass(const char* a_path)
+		{
+			const Obj cls = ue3::FindClass(a_path);
+			if (!cls) {
+				DC_INFO("probe: no class %s", a_path);
+				return;
+			}
+			std::string list;
+			for (Obj c = cls; c; c = ue3::SuperOf(c)) {
+				for (const Obj p : ue3::ChildrenOf(c)) {
+					const auto kind = ue3::NameOf(ue3::ClassOf(p));
+					if (kind.find("Property") == std::string::npos) {
+						continue;
+					}
+					const auto f = ue3::FindField(cls, ue3::NameOf(p));
+					char       e[160];
+					std::snprintf(e, sizeof(e), "%s %s@0x%X(%d), ", kind.c_str(), ue3::NameOf(p).c_str(), f.offset, f.size * f.dim);
+					list += e;
+				}
+				if (ue3::NameOf(c) == "Object") {
+					break;
+				}
+			}
+			DC_INFO("probe: class %s size 0x%X: %s", a_path, ue3::StructSize(cls), list.c_str());
+		}
+
+		void ProbeGeometry(Obj a_pawn)
+		{
+			static bool done = false;
+			if (done || !a_pawn) {
+				return;
+			}
+			done = true;
+			for (const char* c : { "Engine.PrimitiveComponent", "Engine.StaticMeshComponent", "Engine.StaticMesh", "Engine.StaticMeshCollectionActor",
+					 "Engine.BrushComponent", "Engine.Model", "Engine.Level", "Engine.World" }) {
+				DescribeClass(c);
+			}
+			const Obj smc = ue3::FindClass("Engine.StaticMeshComponent");
+			const auto bounds = ue3::FindField(smc, "Bounds");
+			const auto mesh = ue3::FindField(smc, "StaticMesh");
+			if (!smc || !bounds || !mesh) {
+				DC_INFO("probe: StaticMeshComponent.Bounds/StaticMesh not found");
+				return;
+			}
+			const auto at = bind::Location(a_pawn);
+			std::vector<std::pair<float, Obj>> nearest;
+			int total = 0;
+			for (int i = 0, n = ue3::ObjectCount(); i < n; ++i) {
+				const Obj o = ue3::ObjectAt(i);
+				if (!o || !ue3::IsA(o, smc) || ue3::IsDefaultObject(o)) {
+					continue;
+				}
+				++total;
+				const auto c = ue3::Get<UeVector>(o, bounds);
+				const float d = std::sqrt((c.x - at.x) * (c.x - at.x) + (c.y - at.y) * (c.y - at.y) + (c.z - at.z) * (c.z - at.z));
+				nearest.emplace_back(d, o);
+			}
+			std::sort(nearest.begin(), nearest.end());
+			DC_INFO("probe: %d static mesh components; player at (%.0f, %.0f, %.0f)", total, at.x, at.y, at.z);
+			for (std::size_t k = 0; k < nearest.size() && k < 4; ++k) {
+				const Obj  o = nearest[k].second;
+				const Obj  m = ue3::GetObj(o, mesh);
+				const auto c = ue3::Get<UeVector>(o, bounds);
+				DC_INFO("probe: [%zu] %s at %.0f units, bounds origin (%.0f, %.0f, %.0f), mesh %s (class size 0x%X)", k, ue3::PathOf(o).c_str(), nearest[k].first, c.x,
+					c.y, c.z, m ? ue3::PathOf(m).c_str() : "none", m ? ue3::StructSize(ue3::ClassOf(m)) : 0);
+				DC_INFO("probe: [%zu] component memory: %s", k, Hex(o, 0x300).c_str());
+				if (m) {
+					DC_INFO("probe: [%zu] mesh memory: %s", k, Hex(m, 0x400).c_str());
+				}
+			}
+		}
+
 		// ---- self-test: do engine calls work, and what does Trace see? ----------------------------
 		// Logged a few times (first in a level, then after the player has moved far): VSize((3,4,0))
 		// must give 5, and a set of traces from the player with sentinels in every output, so the
@@ -913,6 +1007,8 @@ namespace discraft
 			if (pawn && !menu) {
 				stage = "self-test";
 				SelfTest(a_pc, pawn, pawnLoc, halfHeight);
+				stage = "geometry probe";
+				ProbeGeometry(pawn);
 			}
 			const auto pcRot = bind::Rotation(a_pc);
 			if (teleportPending && pawn && !paused) {
