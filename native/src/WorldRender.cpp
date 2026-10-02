@@ -562,7 +562,7 @@ namespace discraft::WorldRender
 		// Cuts the dug cells out of the game's picture: where the game's surface lies inside a dug cube
 		// (counted like a shadow volume in the stencil), its depth is pushed back to the cube's far
 		// side and painted dark; Minecraft's blocks around the hole then draw over it as its walls.
-		void PunchHoles(IDirect3DDevice9* a_device, const CameraView& a_view, bool a_reversed)
+		void PunchHoles(IDirect3DDevice9* a_device, const CameraView& a_view, bool a_reversed, bool a_stencil)
 		{
 			std::vector<Vertex> cubes;
 			DugCubes(a_view, cubes);
@@ -575,9 +575,12 @@ namespace discraft::WorldRender
 			a_device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
 			a_device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
 			a_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-			a_device->Clear(0, nullptr, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+			if (a_stencil) {
+				a_device->Clear(0, nullptr, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+			}
 			// 1: count faces in front of the game's surface: front faces +1, back faces -1 (either sign
 			// of winding works, only "not zero" is tested).
+			if (a_stencil) {
 			a_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
 			a_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
 			a_device->SetRenderState(D3DRS_ZFUNC, a_reversed ? D3DCMP_GREATEREQUAL : D3DCMP_LESSEQUAL);
@@ -594,7 +597,10 @@ namespace discraft::WorldRender
 			a_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
 			a_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
 			a_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, static_cast<UINT>(cubes.size() / 3), cubes.data(), sizeof(Vertex));
-			// 2: inside a cube: take its far side's depth, and paint the hole.
+			}
+			// 2: inside a cube: take its far side's depth, and paint the hole. (No stencil: every pixel
+			// where the game's surface is nearer than the cube's far side, walls in front included.)
+			a_device->SetRenderState(D3DRS_STENCILENABLE, a_stencil);
 			a_device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
 			a_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_NOTEQUAL);
 			a_device->SetRenderState(D3DRS_STENCILREF, 0);
@@ -689,12 +695,13 @@ namespace discraft::WorldRender
 		a_device->SetTexture(0, atlas.tex);
 
 		if (useGame && !dug.empty()) {
-			if (HasStencil(dsDesc.Format)) {
-				PunchHoles(a_device, a_view, reversed);
-			} else if (!stencilLogged) {
+			const bool stencil = HasStencil(dsDesc.Format);
+			if (!stencilLogged) {
 				stencilLogged = true;
-				DC_WARN("render: the game's depth buffer (format %u) has no stencil; dug holes can't be cut into its picture", static_cast<unsigned>(dsDesc.Format));
+				DC_INFO("render: cutting %zu dug section(s) into the game's picture (depth format %u, %s)", dug.size(), static_cast<unsigned>(dsDesc.Format),
+					stencil ? "stencil" : "no stencil: holes also show through walls in front of them");
 			}
+			PunchHoles(a_device, a_view, reversed, stencil);
 		}
 
 		const auto sectionMatrix = [&](const Section& s) {

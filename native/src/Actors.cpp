@@ -261,6 +261,11 @@ namespace discraft::Actors
 		void HitActor(const proto::McEvent& a_ev, Obj a_pc, Obj a_pawn)
 		{
 			const Obj target = ue3::ObjectAt(static_cast<int>(a_ev.actorId));
+			static int hitsLogged = 0;
+			if (hitsLogged < 5) {
+				++hitsLogged;
+				DC_INFO("combat: Minecraft hit actor #%u (%s)", a_ev.actorId, target && ue3::IsObject(target) ? ue3::PathOf(target).c_str() : "gone");
+			}
 			if (!target || !ue3::IsObject(target) || !ue3::IsA(target, C.pawn) || bind::IsDying(target) || target == a_pawn) {
 				return;
 			}
@@ -284,8 +289,27 @@ namespace discraft::Actors
 			p.Set("Momentum", momentum);
 			p.Set<ue3::Addr>("DamageType", static_cast<ue3::Addr>(type));
 			p.Set<ue3::Addr>("DamageCauser", static_cast<ue3::Addr>(a_pawn));
+			const std::int32_t before = ue3::Get<std::int32_t>(target, F.health);
 			p.Invoke(target);
-			DC_DIAG("combat: Minecraft hit %s for %.1f (game %.0f), health now %d", ue3::NameOf(target).c_str(), a_ev.a, damage,
+			std::int32_t after = ue3::Get<std::int32_t>(target, F.health);
+			// Dishonored's TakeDamage can leave health as it was (its own damage rules, or the call
+			// not reaching the script): take it off directly, and kill when it runs out.
+			if (after >= before && !bind::IsDying(target)) {
+				after = before - static_cast<std::int32_t>(damage);
+				ue3::Set<std::int32_t>(target, F.health, std::max(after, 0));
+				if (after <= 0 && Fn.died) {
+					ue3::Params d(Fn.died);
+					d.Set<ue3::Addr>("Killer", static_cast<ue3::Addr>(a_pc));
+					d.Set<ue3::Addr>("DamageType", static_cast<ue3::Addr>(type));
+					d.Set("HitLocation", loc);
+					d.Invoke(target);
+				}
+				static int logged = 0;
+				if (logged++ < 5) {
+					DC_INFO("combat: TakeDamage left %s at %d; set health to %d directly", ue3::NameOf(target).c_str(), before, after);
+				}
+			}
+			DC_DIAG("combat: Minecraft hit %s for %.1f (game %.0f), health %d -> %d", ue3::NameOf(target).c_str(), a_ev.a, damage, before,
 				ue3::Get<std::int32_t>(target, F.health));
 			(void)upb;
 		}
