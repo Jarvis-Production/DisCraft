@@ -144,7 +144,7 @@ public final class DisClient {
 		}
 	}
 
-	// Minecraft is started with Dishonored (the SKSE plugin launches it), so it goes when that Dishonored has
+	// Minecraft is started with Dishonored (the DisCraft plugin launches it), so it goes when that Dishonored has
 	// closed for good: saved and shut down the normal way. -Ddiscraft.quitWithGame=false keeps it
 	// running instead (development: restarting Dishonored without restarting Minecraft).
 	private static final boolean QUIT_WITH_GAME = Boolean.parseBoolean(System.getProperty("discraft.quitWithGame", "true"));
@@ -169,7 +169,11 @@ public final class DisClient {
 			return;
 		}
 		nextDishonoredCheck = now + 1000;
-		if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+		// Alive while its heartbeat (beaten from its own thread, menus and loading screens included)
+		// is fresh, or while Windows says the process is still there. A process we may not open (a
+		// game run as administrator, or behind a protected launcher) reads as absent, so that alone
+		// never counts as closed while the heartbeat goes on.
+		if (DisLink.active() || ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
 			gameGoneSince = 0;
 			return;
 		}
