@@ -1,0 +1,18 @@
+# gradle / loom
+fabric/.gradle/
+fabric/build/
+fabric/run/
+fabric/out/
+# cmake
+build/
+native/build/
+# ide
+.vs/
+.vscode/
+.idea/
+*.iml
+# release packaging and downloads
+dist/
+.tools/
+__pycache__/
+*.pyc

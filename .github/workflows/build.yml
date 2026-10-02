@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Dishonored plugin (MinGW) + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 cmake
+      - name: Unit tests (coordinates, collision mesher, UE3 discovery on a fake engine)
+        run: |
+          cmake -S native -B build/tests -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/tests -j
+          ctest --test-dir build/tests --output-on-failure
+      - name: Build DisCraft.asi (32-bit Windows)
+        run: |
+          cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$PWD/native/cmake/mingw-i686.cmake
+          cmake --build build/native -j
+          i686-w64-mingw32-strip build/native/DisCraft.asi
+          file build/native/DisCraft.asi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discraft-asi
+          path: build/native/DisCraft.asi
+
+  native-msvc:
+    name: Dishonored plugin (MSVC, Win32)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build DisCraft.asi with MSVC
+        run: |
+          cmake -S native -B build/native -A Win32
+          cmake --build build/native --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discraft-asi-msvc
+          path: build/native/Release/DisCraft.asi
+
+  fabric:
+    name: Minecraft mod (Fabric 26.3)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and test
+        working-directory: fabric
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-configuration-cache --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discraft-fabric
+          path: fabric/build/libs/discraft-*.jar
+
+  package:
+    name: Release zip
+    needs: [native, fabric]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: discraft-asi
+          path: build/native
+      - uses: actions/download-artifact@v4
+        with:
+          name: discraft-fabric
+          path: fabric/build/libs
+      - name: Package
+        run: |
+          ls -la build/native fabric/build/libs
+          python3 tools/package.py --asi build/native/DisCraft.asi --jar "$(ls fabric/build/libs/discraft-*.jar | grep -v sources | head -1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DisCraft-release
+          path: dist/
