@@ -278,6 +278,10 @@ namespace discraft::WorldRender
 						return;
 					}
 					std::memcpy(dug[key].data(), a_data + sizeof(h), 512);
+					static int dugLogged = 0;
+					if (dugLogged++ < 10) {
+						DC_INFO("render: Minecraft dug %u block(s) out of section (%d, %d, %d)", h.count, h.sx, h.sy, h.sz);
+					}
 					break;
 				}
 			case proto::kRenTexture:

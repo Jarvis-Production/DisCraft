@@ -54,7 +54,6 @@ namespace discraft::MeshWorld
 
 		std::vector<Tri>                                 tris;
 		std::unordered_map<long long, std::vector<int>> buckets;  // 1-block xz cells -> tris
-		std::unordered_map<Obj, int>                     meshFailures;
 		Obj        smcClass = 0;
 		ue3::Field fMesh, fLocalToWorld, fBounds;
 		bool       enabled = true;
@@ -62,7 +61,6 @@ namespace discraft::MeshWorld
 		ULONGLONG  builtAt = 0;
 		Vec3d      builtFor{ 1e9, 1e9, 1e9 };
 		int        meshesUsed = 0, meshesSkipped = 0;
-		bool       loggedFirst = false;
 
 		long long BucketKey(int a_x, int a_z) { return (static_cast<long long>(a_x) << 32) ^ static_cast<unsigned>(a_z); }
 
@@ -169,27 +167,44 @@ namespace discraft::MeshWorld
 			return false;
 		}
 
-		// One component's collision triangles, in Minecraft space, added to tris.
-		bool AddComponent(Obj a_comp, double a_upb)
+		bool ReadBytes(std::uintptr_t a_addr, std::size_t a_bytes, void* a_dst)
 		{
-			const Obj mesh = ue3::GetObj(a_comp, fMesh);
-			if (!mesh) {
+			if (a_addr < 0x10000 || !mem::Readable(a_addr, a_bytes)) {
 				return false;
 			}
-			if (const auto it = meshFailures.find(mesh); it != meshFailures.end() && it->second > 0) {
-				return false;
+			std::memcpy(a_dst, reinterpret_cast<const void*>(a_addr), a_bytes);
+			return true;
+		}
+
+		// A mesh's collision triangles in its own space, decoded once and shared by every component
+		// that uses it.
+		struct LocalMesh
+		{
+			std::vector<float>         pos;  // xyz per vertex
+			std::vector<std::uint16_t> idx;  // 3 per triangle
+			bool                       ok{ false };
+		};
+		std::unordered_map<Obj, LocalMesh> meshes;
+
+		const LocalMesh& Decode(Obj a_mesh)
+		{
+			auto [it, fresh] = meshes.try_emplace(a_mesh);
+			LocalMesh& lm = it->second;
+			if (!fresh) {
+				return lm;
 			}
 			std::uint32_t triData = 0;
 			std::int32_t  triCount = 0;
-			if (!Rd(mesh + kOffKdopTris, triData) || !Rd(mesh + kOffKdopTris + 4, triCount) || triCount <= 0 || triCount > 200000) {
-				meshFailures[mesh] = 1;
-				return false;
+			if (!Rd(a_mesh + kOffKdopTris, triData) || !Rd(a_mesh + kOffKdopTris + 4, triCount) || triCount <= 0 || triCount > 200000) {
+				return lm;
 			}
 			float bounds[7];
-			for (int i = 0; i < 7; ++i) {
-				if (!Rd(mesh + kOffBounds + i * 4, bounds[i]) || !std::isfinite(bounds[i])) {
-					meshFailures[mesh] = 1;
-					return false;
+			if (!ReadBytes(a_mesh + kOffBounds, sizeof(bounds), bounds)) {
+				return lm;
+			}
+			for (const float b : bounds) {
+				if (!std::isfinite(b)) {
+					return lm;
 				}
 			}
 			float lo[3], hi[3];
@@ -198,67 +213,89 @@ namespace discraft::MeshWorld
 				lo[c] = bounds[c] - std::abs(bounds[3 + c]) - pad;
 				hi[c] = bounds[c] + std::abs(bounds[3 + c]) + pad;
 			}
-			std::vector<std::uint16_t> idx(static_cast<std::size_t>(triCount) * 4);
-			for (int i = 0; i < triCount * 4; ++i) {
-				if (!Rd(triData + static_cast<std::uintptr_t>(i) * 2, idx[i])) {
-					meshFailures[mesh] = 1;
-					return false;
-				}
+			std::vector<std::uint16_t> raw(static_cast<std::size_t>(triCount) * 4);
+			if (!ReadBytes(triData, raw.size() * 2, raw.data())) {
+				return lm;
 			}
 			int maxIndex = 0;
 			for (int t = 0; t < triCount; ++t) {
-				maxIndex = std::max({ maxIndex, int(idx[t * 4]), int(idx[t * 4 + 1]), int(idx[t * 4 + 2]) });
+				maxIndex = std::max({ maxIndex, int(raw[t * 4]), int(raw[t * 4 + 1]), int(raw[t * 4 + 2]) });
 			}
 			std::uint32_t lods = 0, render = 0;
 			std::int32_t  lodCount = 0;
-			if (!Rd(mesh + kOffLodModels, lods) || !Rd(mesh + kOffLodModels + 4, lodCount) || lodCount <= 0) {
-				meshFailures[mesh] = 1;
-				return false;
+			if (!Rd(a_mesh + kOffLodModels, lods) || !Rd(a_mesh + kOffLodModels + 4, lodCount) || lodCount <= 0) {
+				return lm;
 			}
 			Points pts;
-			// TIndirectArray: an array of pointers. (A plain array of render data tried too.)
 			const bool found = (Rd(lods, render) && FindPoints(render, maxIndex + 1, lo, hi, pts)) || FindPoints(lods, maxIndex + 1, lo, hi, pts);
 			if (!found) {
-				meshFailures[mesh] = 1;
 				if (meshesSkipped++ < 5) {
-					DC_INFO("mesh: no vertex positions found for %s (%d triangles, max index %d)", ue3::PathOf(mesh).c_str(), triCount, maxIndex);
+					DC_INFO("mesh: no vertex positions found for %s (%d triangles, max index %d)", ue3::PathOf(a_mesh).c_str(), triCount, maxIndex);
 				}
+				return lm;
+			}
+			std::vector<std::uint8_t> verts(static_cast<std::size_t>(maxIndex + 1) * pts.stride);
+			if (!ReadBytes(pts.data, verts.size(), verts.data())) {
+				return lm;
+			}
+			lm.pos.resize(static_cast<std::size_t>(maxIndex + 1) * 3);
+			for (int i = 0; i <= maxIndex; ++i) {
+				std::memcpy(&lm.pos[static_cast<std::size_t>(i) * 3], verts.data() + static_cast<std::size_t>(i) * pts.stride, 12);
+			}
+			lm.idx.resize(static_cast<std::size_t>(triCount) * 3);
+			for (int t = 0; t < triCount; ++t) {
+				lm.idx[t * 3] = raw[t * 4];
+				lm.idx[t * 3 + 1] = raw[t * 4 + 1];
+				lm.idx[t * 3 + 2] = raw[t * 4 + 2];
+			}
+			lm.ok = true;
+			return lm;
+		}
+
+		// The structure being built (swapped in when complete, so collision never sees half of it).
+		struct Building
+		{
+			std::vector<Tri>                                 tris;
+			std::unordered_map<long long, std::vector<int>> buckets;
+			std::vector<Obj>                                 queue;
+			std::size_t                                      cursor{ 0 };
+			int                                              used{ 0 };
+			Vec3d                                            feet{};
+			ULONGLONG                                        startedAt{ 0 };
+			bool                                             active{ false };
+		};
+		Building next;
+
+		// One component's collision triangles, in Minecraft space, added to a_b.
+		bool AddComponent(Building& a_b, Obj a_comp, double a_upb)
+		{
+			const Obj mesh = ue3::GetObj(a_comp, fMesh);
+			if (!mesh) {
+				return false;
+			}
+			const LocalMesh& lm = Decode(mesh);
+			if (!lm.ok) {
 				return false;
 			}
 			float m[16];
-			for (int i = 0; i < 16; ++i) {
-				if (!Rd(a_comp + static_cast<std::uintptr_t>(fLocalToWorld.offset) + i * 4, m[i])) {
-					return false;
-				}
+			if (!ReadBytes(a_comp + static_cast<std::uintptr_t>(fLocalToWorld.offset), sizeof(m), m)) {
+				return false;
 			}
-			const auto world = [&](int a_i) {
-				float p[3] = { 0, 0, 0 };
-				for (int c = 0; c < 3; ++c) {
-					Rd(pts.data + static_cast<std::uintptr_t>(a_i) * pts.stride + c * 4, p[c]);
-				}
-				const UeVector w{ p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12], p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13],
+			const std::size_t nv = lm.pos.size() / 3;
+			std::vector<Vec3d> w(nv);
+			for (std::size_t i = 0; i < nv; ++i) {
+				const float* p = &lm.pos[i * 3];
+				const UeVector u{ p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12], p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13],
 					p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14] };
-				return UeToMc(w, a_upb);
-			};
-			std::vector<Vec3d> cache(static_cast<std::size_t>(maxIndex) + 1);
-			std::vector<bool>  have(cache.size(), false);
-			const auto         at = [&](int a_i) -> const Vec3d& {
-                if (!have[a_i]) {
-                    cache[a_i] = world(a_i);
-                    have[a_i] = true;
-                }
-                return cache[a_i];
-			};
-			for (int t = 0; t < triCount; ++t) {
-				const Vec3d& a = at(idx[t * 4]);
-				const Vec3d& b = at(idx[t * 4 + 1]);
-				const Vec3d& c = at(idx[t * 4 + 2]);
+				w[i] = UeToMc(u, a_upb);
+			}
+			for (std::size_t t = 0; t + 2 < lm.idx.size(); t += 3) {
 				Tri tri{};
-				const Vec3d* v[3] = { &a, &b, &c };
 				for (int k = 0; k < 3; ++k) {
-					tri.x[k] = static_cast<float>(v[k]->x);
-					tri.y[k] = static_cast<float>(v[k]->y);
-					tri.z[k] = static_cast<float>(v[k]->z);
+					const Vec3d& v = w[lm.idx[t + k]];
+					tri.x[k] = static_cast<float>(v.x);
+					tri.y[k] = static_cast<float>(v.y);
+					tri.z[k] = static_cast<float>(v.z);
 				}
 				tri.minX = std::min({ tri.x[0], tri.x[1], tri.x[2] });
 				tri.maxX = std::max({ tri.x[0], tri.x[1], tri.x[2] });
@@ -267,64 +304,94 @@ namespace discraft::MeshWorld
 				if (tri.maxX - tri.minX > 256 || tri.maxZ - tri.minZ > 256) {
 					continue;  // garbage
 				}
-				const int id = static_cast<int>(tris.size());
-				tris.push_back(tri);
+				const int id = static_cast<int>(a_b.tris.size());
+				a_b.tris.push_back(tri);
 				for (int bx = static_cast<int>(std::floor(tri.minX)); bx <= static_cast<int>(std::floor(tri.maxX)); ++bx) {
 					for (int bz = static_cast<int>(std::floor(tri.minZ)); bz <= static_cast<int>(std::floor(tri.maxZ)); ++bz) {
-						buckets[BucketKey(bx, bz)].push_back(id);
+						a_b.buckets[BucketKey(bx, bz)].push_back(id);
 					}
 				}
 			}
 			return true;
 		}
 
-		void Build(const Vec3d& a_feet)
+		// Every static mesh component in the level (rescanned now and then; cheap compared to decoding).
+		std::vector<Obj> components;
+		ULONGLONG        componentsAt = 0;
+
+		void ScanComponents()
 		{
-			const double    upb = State().unitsPerBlock;
-			const ULONGLONG startedAt = ::GetTickCount64();
-			tris.clear();
-			buckets.clear();
-			meshesUsed = 0;
+			components.clear();
+			for (int i = 0, n = ue3::ObjectCount(); i < n; ++i) {
+				const Obj o = ue3::ObjectAt(i);
+				if (o && ue3::IsA(o, smcClass) && !ue3::IsDefaultObject(o)) {
+					components.push_back(o);
+				}
+			}
+			componentsAt = ::GetTickCount64();
+		}
+
+		void StartBuild(const Vec3d& a_feet)
+		{
+			const double upb = State().unitsPerBlock;
+			if (components.empty() || ::GetTickCount64() - componentsAt > 30000) {
+				ScanComponents();
+			}
+			next = Building{};
+			next.active = true;
+			next.feet = a_feet;
+			next.startedAt = ::GetTickCount64();
 			static const double radius = config::Float("World", "fMeshRadiusBlocks", 40.0f);
 			const UeVector      centre = McToUe(a_feet.x, a_feet.y, a_feet.z, upb);
 			const double        reach = radius * upb;
-			int                 scanned = 0;
-			for (int i = 0, n = ue3::ObjectCount(); i < n; ++i) {
-				const Obj o = ue3::ObjectAt(i);
-				if (!o || !ue3::IsA(o, smcClass) || ue3::IsDefaultObject(o)) {
-					continue;
-				}
+			std::vector<std::pair<double, Obj>> near_;
+			for (const Obj o : components) {
 				float b[7];
-				bool  ok = true;
-				for (int k = 0; k < 7 && ok; ++k) {
-					ok = Rd(o + static_cast<std::uintptr_t>(fBounds.offset) + k * 4, b[k]);
-				}
-				if (!ok || !(b[6] > 1.0f) || b[6] > 1e6f) {
+				if (!ReadBytes(o + static_cast<std::uintptr_t>(fBounds.offset), sizeof(b), b) || !(b[6] > 1.0f) || b[6] > 1e6f) {
 					continue;
 				}
 				const double dx = b[0] - centre.x, dy = b[1] - centre.y, dz = b[2] - centre.z;
-				if (std::sqrt(dx * dx + dy * dy + dz * dz) > reach + b[6]) {
+				const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+				if (d > reach + b[6] || ue3::GetBool(o, bind::F.hiddenGame)) {
 					continue;
 				}
-				++scanned;
-				if (ue3::GetBool(o, bind::F.hiddenGame)) {
-					continue;  // hidden (ours: the player's own parts)
+				near_.emplace_back(d, o);
+			}
+			std::sort(near_.begin(), near_.end());  // nearest first
+			for (const auto& [d, o] : near_) {
+				next.queue.push_back(o);
+			}
+		}
+
+		// Works on the build for about a_budgetMs; swaps it in when complete.
+		void StepBuild(double a_budgetMs)
+		{
+			LARGE_INTEGER freq, start, now;
+			::QueryPerformanceFrequency(&freq);
+			::QueryPerformanceCounter(&start);
+			const double upb = State().unitsPerBlock;
+			while (next.cursor < next.queue.size()) {
+				if (AddComponent(next, next.queue[next.cursor], upb)) {
+					++next.used;
 				}
-				if (AddComponent(o, upb)) {
-					++meshesUsed;
+				++next.cursor;
+				::QueryPerformanceCounter(&now);
+				if (double(now.QuadPart - start.QuadPart) * 1000.0 / double(freq.QuadPart) > a_budgetMs) {
+					return;
 				}
 			}
-			ready = !tris.empty();
+			tris.swap(next.tris);
+			buckets.swap(next.buckets);
+			meshesUsed = next.used;
+			builtFor = next.feet;
 			builtAt = ::GetTickCount64();
-			builtFor = a_feet;
-			if (!loggedFirst || ready) {
-				static int logs = 0;
-				if (logs++ < 6) {
-					DC_INFO("mesh: %d of %d nearby static meshes give %zu collision triangles (%llu ms)", meshesUsed, scanned, tris.size(),
-						::GetTickCount64() - startedAt);
-				}
-				loggedFirst = true;
+			ready = !tris.empty();
+			static int logs = 0;
+			if (logs++ < 8) {
+				DC_INFO("mesh: %d of %zu nearby static meshes give %zu collision triangles (built over %llu ms, %zu meshes decoded)", meshesUsed, next.queue.size(),
+					tris.size(), builtAt - next.startedAt, meshes.size());
 			}
+			next = Building{};
 		}
 	}
 
@@ -346,10 +413,18 @@ namespace discraft::MeshWorld
 		if (!enabled) {
 			return;
 		}
-		const double moved = std::hypot(a_feet.x - builtFor.x, a_feet.z - builtFor.z);
-		const ULONGLONG now = ::GetTickCount64();
-		if (moved > 12.0 || now - builtAt > 15000) {
-			Build(a_feet);
+		if (!next.active) {
+			const double    moved = std::hypot(a_feet.x - builtFor.x, a_feet.z - builtFor.z);
+			const ULONGLONG now = ::GetTickCount64();
+			static const double radius = config::Float("World", "fMeshRadiusBlocks", 40.0f);
+			if (moved > radius * 0.4 || now - builtAt > 20000) {
+				StartBuild(a_feet);
+			}
+		}
+		if (next.active) {
+			// Nothing yet: build faster (the player waits for collision anyway).
+			static const double budget = config::Float("World", "fMeshBudgetMs", 2.0f);
+			StepBuild(ready ? budget : budget * 4.0);
 		}
 	}
 
@@ -357,7 +432,9 @@ namespace discraft::MeshWorld
 	{
 		tris.clear();
 		buckets.clear();
-		meshFailures.clear();
+		meshes.clear();
+		components.clear();
+		next = Building{};
 		ready = false;
 		builtAt = 0;
 		builtFor = { 1e9, 1e9, 1e9 };
