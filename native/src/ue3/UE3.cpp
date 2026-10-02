@@ -205,7 +205,7 @@ namespace discraft::ue3
 				if (!o) {
 					continue;
 				}
-				if ((o & 3) || !Ok(o, 0x80)) {
+				if ((o & 3) || !Ok(o, 0x24)) {
 					return false;
 				}
 				samples.emplace_back(i, o);
@@ -216,7 +216,7 @@ namespace discraft::ue3
 			for (int off = 4; off < 0x80; off += 4) {
 				bool all = true;
 				for (const auto& [i, o] : samples) {
-					if (Rd<std::int32_t>(o + off) != i) {
+					if (!Ok(o + off, 4) || Rd<std::int32_t>(o + off) != i) {
 						all = false;
 						break;
 					}
@@ -394,7 +394,7 @@ namespace discraft::ue3
 			std::vector<bool> seen(ids.size(), false);
 			for (int i = 0; i < count; ++i) {
 				const Obj o = ObjectAt(i);
-				if (!o) {
+				if (!o || !Ok(o + off, 4)) {
 					continue;
 				}
 				const int v = Rd<std::int32_t>(o + off);
@@ -419,7 +419,7 @@ namespace discraft::ue3
 		std::vector<Obj> objectNamed;
 		for (int i = 0; i < count; ++i) {
 			const Obj o = ObjectAt(i);
-			if (!o) {
+			if (!o || !Ok(o + L.name, 4)) {
 				continue;
 			}
 			const int n = Rd<std::int32_t>(o + L.name);
@@ -434,14 +434,14 @@ namespace discraft::ue3
 		L.cls = FirstOffset(4, 0x80, { L.index, L.name, L.name + 4 }, [&](int off) {
 			std::size_t valid = 0;
 			for (const Obj o : sample) {
-				if (IsObject(Rd<Addr>(o + off))) {
+				if (IsObject(Rd<Addr>(o + off))) {  // the sample is readable to 0x100
 					++valid;
 				}
 			}
 			if (valid < sample.size() * 98 / 100) {
 				return false;
 			}
-			return std::any_of(classNamed.begin(), classNamed.end(), [&](Obj c) { return Rd<Addr>(c + off) == c; });
+			return std::any_of(classNamed.begin(), classNamed.end(), [&](Obj c) { return Ok(c + off, 4) && Rd<Addr>(c + off) == c; });
 		});
 		if (L.cls < 0) {
 			DC_WARN("UE3: couldn't find UObject::Class");
@@ -456,8 +456,11 @@ namespace discraft::ue3
 					if (!isClass(o)) {
 						return false;
 					}
+					if (!Ok(o + off, 4)) {
+						return false;
+					}
 					const Obj p = Rd<Addr>(o + off);
-					return IsObject(p) && NameIndexOf(p) == a_package && NameIndexOf(ClassOf(p)) == idPackage && Rd<Addr>(p + off) == 0;
+					return IsObject(p) && Ok(p + off, 4) && NameIndexOf(p) == a_package && NameIndexOf(ClassOf(p)) == idPackage && Rd<Addr>(p + off) == 0;
 				});
 			};
 			return inPackage(actorNamed, idEngine) && inPackage(objectNamed, idCore);
@@ -602,7 +605,7 @@ namespace discraft::ue3
 			std::vector<Obj> functions;
 			for (int i = 0; i < count && functions.size() < 40000; ++i) {
 				const Obj o = ObjectAt(i);
-				if (o && ClassOf(o) == functionCls) {
+				if (o && Ok(o + L.cls, 4) && ClassOf(o) == functionCls) {
 					functions.push_back(o);
 				}
 			}
@@ -611,6 +614,9 @@ namespace discraft::ue3
 				std::size_t                                  inCode = 0;
 				std::unordered_map<std::uint32_t, std::size_t> histogram;
 				for (const Obj f : functions) {
+					if (!Ok(f + off, 4)) {
+						continue;
+					}
 					const Addr v = Rd<Addr>(f + off);
 					if (InRanges(v, a_code)) {
 						++inCode;
@@ -632,6 +638,9 @@ namespace discraft::ue3
 				L.funcFlags = FirstOffset(L.propertySize + 4, L.func + 0x10, { L.func }, [&](int off) {
 					std::size_t agree = 0;
 					for (const Obj f : functions) {
+						if (!Ok(f + off, 4)) {
+							continue;
+						}
 						const bool native = (Rd<std::uint32_t>(f + off) & kFuncNative) != 0;
 						if (native == (Rd<Addr>(f + L.func) != processInternal)) {
 							++agree;
