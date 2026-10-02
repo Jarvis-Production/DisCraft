@@ -16,6 +16,7 @@ add_library(discraft_core STATIC
 	src/Log.cpp
 	src/Mem.cpp
 	src/Mesher.cpp
+	src/Seh.cpp
 	src/ue3/UE3.cpp
 )
 target_include_directories(discraft_core PUBLIC src ${PROTOCOL_DIR})

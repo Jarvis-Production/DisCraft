@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "Log.h"
 #include "Mem.h"
+#include "Seh.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +49,10 @@ namespace discraft
 		bool                           warnedNoOriginal = false;
 		std::string                    tickName;  // the candidate that matched, once one has
 		std::atomic<bool>              tickMissing{ false };
+		// The per-frame update faulted: DisCraft stops (the game goes on). stage says where it was.
+		std::atomic<bool>              tickBroken{ false };
+		const char* volatile           stage = "start";
+		std::string                    brokenAt;
 
 		// ---- game-thread state --------------------------------------------------------------------
 		proto::McState mc{};
@@ -569,6 +574,7 @@ namespace discraft
 			st.mcCrosshair = puppet && mc.cameraMode == 0 && !st.mcScreenOpen;
 			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
 
+			stage = "moving the player";
 			if (puppet) {
 				const auto m = Interpolate(mc);
 				Puppet(a_pc, pawn, m, halfHeight);
@@ -612,6 +618,7 @@ namespace discraft
 			gs.viewportH = static_cast<std::uint32_t>(st.overlayH.load());
 			gs.gameHour = 12.0f;
 			link.WriteGameState(gs);
+			stage = "use key";
 
 			// G (by default): the game's own "use" (doors, pickups, talking), at what the player looks at.
 			if (Input::TakeUseRequest() && puppet) {
@@ -625,8 +632,11 @@ namespace discraft
 				}
 			}
 
+			stage = "camera";
 			SnapshotCamera(a_pc, pawn, halfHeight);
+			stage = "actors and combat";
 			Actors::PerFrame(a_pc, pawn, puppet, delta);
+			stage = "collision";
 			if (settleTimer > 0.0f) {
 				settleTimer -= delta;
 			} else if (pawn && mcAlive) {
@@ -772,7 +782,18 @@ namespace discraft
 				if (processEventSearched && !probes.empty()) {
 					RemoveProbes();
 				}
-				Tick(self);
+				if (!tickBroken) {
+					seh::Fault fault;
+					stage = "start";
+					if (!seh::Run([](void* a_pc) { Tick(reinterpret_cast<Obj>(a_pc)); }, a_self, fault)) {
+						tickBroken = true;
+						{
+							std::lock_guard guard(statusLock);
+							brokenAt = stage;
+						}
+						DC_ERROR("DisCraft stopped: the per-frame update failed in \"%s\": %s", stage, seh::Describe(fault).c_str());
+					}
+				}
 			}
 		}
 
@@ -939,6 +960,10 @@ namespace discraft
 		std::wstring StatusText()
 		{
 			auto& st = State();
+			if (tickBroken) {
+				std::lock_guard guard(statusLock);
+				return L"DisCraft stopped after an error (" + std::wstring(brokenAt.begin(), brokenAt.end()) + L"); see %LOCALAPPDATA%\\DisCraft\\DisCraft.log";
+			}
 			if (discoveryFailed) {
 				return L"DisCraft: Unreal Engine data not found; see %LOCALAPPDATA%\\DisCraft\\DisCraft.log";
 			}

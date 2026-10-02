@@ -68,13 +68,15 @@ jobs:
 
   package:
     name: Release zip
-    needs: [native, fabric]
+    # The release ships the MSVC build: only it can catch a fault in a call into the game
+    # (structured exceptions), so a wrong guess about the engine stops DisCraft, not Dishonored.
+    needs: [native, native-msvc, fabric]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
-          name: discraft-asi
+          name: discraft-asi-msvc
           path: build/native
       - uses: actions/download-artifact@v7
         with:

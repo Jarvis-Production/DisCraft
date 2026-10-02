@@ -1,5 +1,7 @@
 #include "UE3.h"
 
+#include "Seh.h"
+
 #include "../Config.h"
 #include "../Log.h"
 
@@ -1022,27 +1024,91 @@ namespace discraft::ue3
 	void SetProcessEventIndex(int a_index) { processEventIndex = a_index; }
 	int  ProcessEventIndex() { return processEventIndex; }
 
+	namespace
+	{
+		using ProcessEventFn = void(DC_THISCALL*)(void*, void*, void*, void*);
+
+		struct PendingCall
+		{
+			ProcessEventFn pe;
+			void*          object;
+			void*          function;
+			void*          parms;
+		};
+
+		void DoCall(void* a_call)
+		{
+			const auto* c = static_cast<PendingCall*>(a_call);
+			c->pe(c->object, c->function, c->parms, nullptr);
+		}
+
+		// How a native function's FUNC_Native flag is set while ProcessEvent runs it ([Engine]
+		// iNativeCallMode): 0 as it is, 1 set, 2 cleared, 3 every flag set (what UE3 SDK generators
+		// do). When a call faults, the next mode is tried; when all have, engine calls stop.
+		std::vector<int> callModes;
+		std::size_t      callMode = 0;
+		bool             callsBroken = false;
+
+		std::uint32_t FlagsFor(int a_mode, std::uint32_t a_flags)
+		{
+			switch (a_mode) {
+			case 1:
+				return a_flags | kFuncNative;
+			case 2:
+				return a_flags & ~kFuncNative;
+			case 3:
+				return a_flags | ~kFuncNative;
+			default:
+				return a_flags;
+			}
+		}
+	}
+
+	bool CallsWork() { return !callsBroken; }
+
 	bool CallFunction(Obj a_object, Obj a_function, void* a_parms)
 	{
 #if defined(_WIN32) && (defined(_M_IX86) || defined(__i386__))
-		if (!a_object || !a_function || processEventIndex <= 0) {
+		if (!a_object || !a_function || processEventIndex <= 0 || callsBroken) {
 			return false;
 		}
-		using ProcessEventFn = void(DC_THISCALL*)(void*, void*, void*, void*);
+		if (callModes.empty()) {
+			const int configured = std::clamp(config::Int("Engine", "iNativeCallMode", 0), 0, 3);
+			callModes.push_back(configured);
+			for (const int m : { 0, 3, 1, 2 }) {
+				if (m != configured) {
+					callModes.push_back(m);
+				}
+			}
+		}
 		const Addr vtable = Rd<Addr>(a_object);
 		const auto pe = reinterpret_cast<ProcessEventFn>(static_cast<std::uintptr_t>(Rd<Addr>(vtable + static_cast<std::uintptr_t>(processEventIndex) * 4)));
-		// [Engine] iNativeCallMode: some UE3 builds want FUNC_Native set (1) or cleared (2) while a
-		// native function is called through ProcessEvent. 0 (default): leave it as it is.
-		static const int mode = config::Int("Engine", "iNativeCallMode", 0);
-		std::uint32_t    savedFlags = 0;
-		const bool       toggle = mode != 0 && L.funcFlags >= 0 && IsNativeFunction(a_function);
-		if (toggle) {
-			savedFlags = Rd<std::uint32_t>(a_function + L.funcFlags);
-			mem::Write<std::uint32_t>(a_function + L.funcFlags, mode == 1 ? (savedFlags | kFuncNative) : (savedFlags & ~kFuncNative));
+		if (!mem::InCode(reinterpret_cast<std::uintptr_t>(pe))) {
+			return false;
 		}
-		pe(reinterpret_cast<void*>(a_object), reinterpret_cast<void*>(a_function), a_parms, nullptr);
+		const int           mode = callModes[callMode];
+		const bool          toggle = mode != 0 && L.funcFlags >= 0 && IsNativeFunction(a_function);
+		const std::uint32_t savedFlags = L.funcFlags >= 0 ? Rd<std::uint32_t>(a_function + L.funcFlags) : 0;
+		if (toggle) {
+			mem::Write<std::uint32_t>(a_function + L.funcFlags, FlagsFor(mode, savedFlags));
+		}
+		PendingCall call{ pe, reinterpret_cast<void*>(a_object), reinterpret_cast<void*>(a_function), a_parms };
+		seh::Fault  fault;
+		const bool  ok = seh::Run(&DoCall, &call, fault);
 		if (toggle) {
 			mem::Write<std::uint32_t>(a_function + L.funcFlags, savedFlags);
+		}
+		if (!ok) {
+			DC_ERROR("UE3: %s on %s through ProcessEvent (slot %d, %s, flags 0x%08X, native call mode %d) failed: %s", PathOf(a_function).c_str(),
+				FullNameOf(a_object).c_str(), processEventIndex, Where(reinterpret_cast<std::uintptr_t>(pe)).c_str(), savedFlags, mode,
+				seh::Describe(fault).c_str());
+			if (++callMode >= callModes.size()) {
+				callsBroken = true;
+				DC_ERROR("UE3: every way of calling engine functions failed; DisCraft makes no more engine calls");
+			} else {
+				DC_WARN("UE3: trying native call mode %d next", callModes[callMode]);
+			}
+			return false;
 		}
 		return true;
 #else
@@ -1052,6 +1118,8 @@ namespace discraft::ue3
 		return false;
 #endif
 	}
+
+	std::string Where(std::uintptr_t a_address) { return seh::Where(a_address); }
 
 	Params::Params(Obj a_function) :
 		function_(a_function), buffer_(static_cast<std::size_t>(std::max(StructSize(a_function), 0)) + 16, 0)

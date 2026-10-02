@@ -237,4 +237,8 @@ namespace discraft::ue3
 	// Whether script made this call (the frame has a PreviousFrame) or native code did, through
 	// ProcessEvent (it hasn't): 1 or 0, -1 while the frame's layout is unknown.
 	int           FrameCalledFromScript(void* a_frame, Obj a_self);
+	// False once calls through ProcessEvent have faulted in every native call mode.
+	bool          CallsWork();
+	// "Dishonored.exe+0x1234" for a code address.
+	std::string   Where(std::uintptr_t a_address);
 }
