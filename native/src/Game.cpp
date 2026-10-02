@@ -711,6 +711,17 @@ namespace discraft
 
 		void HookTickFunctions()
 		{
+			// Only when packages were loaded since the last look (a map load adds classes), or once a
+			// minute (new objects can also reuse freed slots without growing the array).
+			static int       scannedCount = -1;
+			static ULONGLONG scannedAt = 0;
+			const int        objectCount = ue3::ObjectCount();
+			const ULONGLONG  now = ::GetTickCount64();
+			if (objectCount == scannedCount && now - scannedAt < 60000) {
+				return;
+			}
+			scannedCount = objectCount;
+			scannedAt = now;
 			const auto name = config::String("Engine", "sTickFunction", "PlayerTick");
 			int        added = 0;
 			for (const Obj f : ue3::FunctionsNamed(name)) {
