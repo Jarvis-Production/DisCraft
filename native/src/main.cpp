@@ -181,9 +181,10 @@ namespace
 		wchar_t exe[MAX_PATH]{};
 		::GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		DC_INFO("DisCraft %s loading into %s (DisCraft.ini %s)", kVersion, config::Narrow(exe).c_str(), config::Found() ? "found" : "not found: defaults");
-		if (config::Bool("Debug", "bCrashLog", true)) {
-			seh::InstallCrashLog();
-		}
+		// Faults in calls into the game are taken back (and logged) by this handler; calls that
+		// crashed the game in an earlier run of this build are not made again.
+		seh::InstallCrashLog();
+		seh::InitCrashGuard();
 		if (!Link::Get().Create()) {
 			DC_ERROR("DisCraft disabled: could not create shared memory");
 			return 0;

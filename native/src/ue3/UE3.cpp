@@ -1061,26 +1061,7 @@ namespace discraft::ue3
 			c->pe(c->object, c->function, c->parms, nullptr);
 		}
 
-		// How a native function's FUNC_Native flag is set while ProcessEvent runs it ([Engine]
-		// iNativeCallMode): 0 as it is, 1 set, 2 cleared, 3 every flag set (what UE3 SDK generators
-		// do). When a call faults, the next mode is tried; when all have, engine calls stop.
-		std::vector<int> callModes;
-		std::size_t      callMode = 0;
-		bool             callsBroken = false;
-
-		std::uint32_t FlagsFor(int a_mode, std::uint32_t a_flags)
-		{
-			switch (a_mode) {
-			case 1:
-				return a_flags | kFuncNative;
-			case 2:
-				return a_flags & ~kFuncNative;
-			case 3:
-				return a_flags | ~kFuncNative;
-			default:
-				return a_flags;
-			}
-		}
+		bool callsBroken = false;
 	}
 
 	// ---- calling native functions the way script does --------------------------------------------
@@ -1099,7 +1080,6 @@ namespace discraft::ue3
 
 		std::array<std::uint8_t, 0x100> frameTemplate{};
 		bool                            haveFrameTemplate = false;
-		bool                            nativeDirectBroken = false;
 
 		struct NativeCall
 		{
@@ -1118,7 +1098,7 @@ namespace discraft::ue3
 		// 1 called, 0 not possible here (use ProcessEvent), -1 faulted.
 		int CallNative(Obj a_object, Obj a_function, std::uint8_t* a_parms, const std::vector<int>* a_passed)
 		{
-			if (!haveFrameTemplate || nativeDirectBroken || L.frameNode < 0 || L.elementSize < 0 || L.offset < 0) {
+			if (!haveFrameTemplate || L.frameNode < 0 || L.elementSize < 0 || L.offset < 0) {
 				return 0;
 			}
 			const auto func = reinterpret_cast<std::uintptr_t>(GetFunc(a_function));
@@ -1132,6 +1112,9 @@ namespace discraft::ue3
 				int                              returnOffset{ -1 };
 				bool                             flagsKnown{ false };
 				std::string                      activity;  // for the crash log
+				std::string                      key;       // for the crash guard: the function's path
+				bool                             broken{ false };  // faulted (or crashed the game before)
+				bool                             tried{ false };   // called once this run
 			};
 			static std::unordered_map<Obj, NativeInfo> infos;
 			auto it = infos.find(a_function);
@@ -1169,8 +1152,16 @@ namespace discraft::ue3
 					}
 				}
 				std::sort(info.ordered.begin(), info.ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-				info.activity = "calling native " + PathOf(a_function);
+				info.key = PathOf(a_function);
+				info.activity = "calling native " + info.key;
+				if (seh::Blocked(info.key)) {
+					info.broken = true;
+					DC_WARN("UE3: %s is not called: it crashed the game in an earlier run", info.key.c_str());
+				}
 				it = infos.emplace(a_function, std::move(info)).first;
+			}
+			if (it->second.broken) {
+				return -1;
 			}
 			const auto& ordered = it->second.ordered;
 			const int   returnOffset = it->second.returnOffset;
@@ -1224,14 +1215,21 @@ namespace discraft::ue3
 			std::uint8_t scratch[64]{};
 			NativeCall   call{ reinterpret_cast<NativeFn>(func), reinterpret_cast<void*>(a_object), frame.data(),
                 returnOffset >= 0 ? static_cast<void*>(a_parms + returnOffset) : static_cast<void*>(scratch) };
-			seh::SetActivity(it->second.activity.c_str());
+			auto& info = it->second;
+			if (!info.tried) {
+				seh::Trying(info.key);  // if the game dies in this, the next run of this build won't call it
+			}
+			seh::SetActivity(info.activity.c_str());
 			seh::Fault fault;
-			const bool ran = seh::Run(&DoNative, &call, fault);
+			const bool ran = seh::RunRecoverable(&DoNative, &call, fault);
 			seh::SetActivity(nullptr);
+			if (!info.tried) {
+				info.tried = true;
+				seh::Survived(info.key);
+			}
 			if (!ran) {
-				DC_ERROR("UE3: calling native %s on %s directly failed: %s; back to ProcessEvent", PathOf(a_function).c_str(), FullNameOf(a_object).c_str(),
-					seh::Describe(fault).c_str());
-				nativeDirectBroken = true;
+				DC_ERROR("UE3: native %s on %s faulted: %s; not calling it again", info.key.c_str(), FullNameOf(a_object).c_str(), seh::Describe(fault).c_str());
+				info.broken = true;
 				return -1;
 			}
 			static bool logged = false;
@@ -1265,48 +1263,33 @@ namespace discraft::ue3
 		if (!a_object || !a_function || processEventIndex <= 0 || callsBroken) {
 			return false;
 		}
-		if (callModes.empty()) {
-			const int configured = std::clamp(config::Int("Engine", "iNativeCallMode", 0), 0, 3);
-			callModes.push_back(configured);
-			for (const int m : { 0, 3, 1, 2 }) {
-				if (m != configured) {
-					callModes.push_back(m);
-				}
-			}
-		}
+		// Natives only directly: through ProcessEvent they get none of their arguments here.
 		if (IsNativeFunction(a_function)) {
-			const int direct = CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms), a_passed);
-			if (direct > 0) {
-				return true;
-			}
+			return CallNative(a_object, a_function, static_cast<std::uint8_t*>(a_parms), a_passed) > 0;
+		}
+		static std::unordered_map<Obj, std::string> activities;
+		static std::unordered_map<Obj, bool>        broken;
+		if (broken[a_function]) {
+			return false;
 		}
 		const Addr vtable = Rd<Addr>(a_object);
 		const auto pe = reinterpret_cast<ProcessEventFn>(static_cast<std::uintptr_t>(Rd<Addr>(vtable + static_cast<std::uintptr_t>(processEventIndex) * 4)));
 		if (!mem::InCode(reinterpret_cast<std::uintptr_t>(pe))) {
 			return false;
 		}
-		const int           mode = callModes[callMode];
-		const bool          toggle = mode != 0 && L.funcFlags >= 0 && IsNativeFunction(a_function);
-		const std::uint32_t savedFlags = L.funcFlags >= 0 ? Rd<std::uint32_t>(a_function + L.funcFlags) : 0;
-		if (toggle) {
-			mem::Write<std::uint32_t>(a_function + L.funcFlags, FlagsFor(mode, savedFlags));
+		auto& activity = activities[a_function];
+		if (activity.empty()) {
+			activity = "calling " + PathOf(a_function) + " through ProcessEvent";
 		}
 		PendingCall call{ pe, reinterpret_cast<void*>(a_object), reinterpret_cast<void*>(a_function), a_parms };
 		seh::Fault  fault;
-		const bool  ok = seh::Run(&DoCall, &call, fault);
-		if (toggle) {
-			mem::Write<std::uint32_t>(a_function + L.funcFlags, savedFlags);
-		}
+		seh::SetActivity(activity.c_str());
+		const bool ok = seh::RunRecoverable(&DoCall, &call, fault);
+		seh::SetActivity(nullptr);
 		if (!ok) {
-			DC_ERROR("UE3: %s on %s through ProcessEvent (slot %d, %s, flags 0x%08X, native call mode %d) failed: %s", PathOf(a_function).c_str(),
-				FullNameOf(a_object).c_str(), processEventIndex, Where(reinterpret_cast<std::uintptr_t>(pe)).c_str(), savedFlags, mode,
-				seh::Describe(fault).c_str());
-			if (++callMode >= callModes.size()) {
-				callsBroken = true;
-				DC_ERROR("UE3: every way of calling engine functions failed; DisCraft makes no more engine calls");
-			} else {
-				DC_WARN("UE3: trying native call mode %d next", callModes[callMode]);
-			}
+			DC_ERROR("UE3: %s on %s through ProcessEvent (slot %d) faulted: %s; not calling it again", PathOf(a_function).c_str(), FullNameOf(a_object).c_str(),
+				processEventIndex, seh::Describe(fault).c_str());
+			broken[a_function] = true;
 			return false;
 		}
 		return true;
@@ -1314,6 +1297,7 @@ namespace discraft::ue3
 		(void)a_object;
 		(void)a_function;
 		(void)a_parms;
+		(void)a_passed;
 		return false;
 #endif
 	}

@@ -532,13 +532,6 @@ namespace discraft
 			}
 			const UeVector eye{ at.x, at.y, at.z + a_halfHeight * 0.5f };
 			const UeVector below{ at.x, at.y, at.z - 1000.0f };
-			TestTrace("down", a_pawn, eye, below, true, 0.0f);
-			TestTrace("down, world only", a_pawn, eye, below, false, 0.0f);
-			TestTrace("down, extent 10", a_pawn, eye, below, true, 10.0f);
-			TestTrace("from high above", a_pawn, UeVector{ at.x, at.y, at.z + 3000.0f }, below, true, 0.0f);
-			const auto   rot = bind::Rotation(a_pc);
-			const double yaw = rot.yaw * (6.283185307179586 / 65536.0);
-			TestTrace("forward", a_pawn, eye, UeVector{ at.x + float(std::cos(yaw) * 3000.0), at.y + float(std::sin(yaw) * 3000.0), eye.z }, true, 0.0f);
 			if (Fn.fastTrace) {
 				ue3::Params p(Fn.fastTrace);
 				p.Set("TraceEnd", below).Set("TraceStart", eye).Set("BoxExtent", UeVector{}).SetBool("bTraceBullet", false);
@@ -554,6 +547,16 @@ namespace discraft
 				}
 				DC_INFO("self-test FastTrace down: call %s, returned %08X (0: blocked, nonzero: clear)", called ? "ok" : "FAILED", got);
 			}
+			// World geometry only first (what collision uses); with actors last: a fault turns Trace
+			// off for the rest of the run.
+			const auto   rot = bind::Rotation(a_pc);
+			const double yaw = rot.yaw * (6.283185307179586 / 65536.0);
+			TestTrace("down, world only", a_pawn, eye, below, false, 0.0f);
+			TestTrace("from high above, world only", a_pawn, UeVector{ at.x, at.y, at.z + 3000.0f }, below, false, 0.0f);
+			TestTrace("forward, world only", a_pawn, eye, UeVector{ at.x + float(std::cos(yaw) * 3000.0), at.y + float(std::sin(yaw) * 3000.0), eye.z }, false,
+				0.0f);
+			TestTrace("down, world only, extent 10", a_pawn, eye, below, false, 10.0f);
+			TestTrace("down, with actors", a_pawn, eye, below, true, 0.0f);
 		}
 
 		void Release(Obj a_pc)

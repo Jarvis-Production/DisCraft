@@ -38,6 +38,7 @@ namespace discraft::Collision
 		constexpr int   kAbove = 64;        // ...and above its bottom
 		constexpr int   kMaxHits = 16;      // per column and direction
 		constexpr float kThinSlab = 0.25f;  // a surface seen from one side only is this thick
+		constexpr double kMaxTraceBlocks = 24.0;  // longer lines are traced in pieces
 
 		struct Key
 		{
@@ -82,6 +83,20 @@ namespace discraft::Collision
 			std::uint32_t traceActorsMask{ 1 };
 			bool ok{ false };
 		};
+		// Trace can fail in this game (it is then left alone); the world's shape then comes from
+		// FastTrace, which only says whether a line is blocked: surfaces are found by halving.
+		int  traceFailures = 0;
+		bool fastMode = false;
+		struct FastLayout
+		{
+			int              size{ 0 };
+			int              traceEnd{ -1 }, traceStart{ -1 }, extent{ -1 }, bullet{ -1 }, returnValue{ -1 };
+			std::vector<int> passed;
+			bool             ok{ false };
+		};
+		FastLayout                fastLayout;
+		std::vector<std::uint8_t> fastParms;
+
 		// For the log: what the traces find.
 		int                      regionsSent = 0;
 		long long                hitsTotal = 0;
@@ -124,6 +139,22 @@ namespace discraft::Collision
 				                 traceLayout.returnValue >= 0;
 				traceParms.assign(static_cast<std::size_t>(traceLayout.size) + 16, 0);
 			}
+			if (Fn.fastTrace) {
+				const auto f = [](const char* n) { return ue3::FindField(Fn.fastTrace, n).offset; };
+				fastLayout.size = std::max(ue3::StructSize(Fn.fastTrace), 16);
+				fastLayout.traceEnd = f("TraceEnd");
+				fastLayout.traceStart = f("TraceStart");
+				fastLayout.extent = f("BoxExtent");
+				fastLayout.bullet = f("bTraceBullet");
+				fastLayout.returnValue = f("ReturnValue");
+				for (const int o : { fastLayout.traceEnd, fastLayout.traceStart, fastLayout.extent, fastLayout.bullet }) {
+					if (o >= 0) {
+						fastLayout.passed.push_back(o);
+					}
+				}
+				fastLayout.ok = fastLayout.traceEnd >= 0 && fastLayout.traceStart >= 0 && fastLayout.returnValue >= 0;
+				fastParms.assign(static_cast<std::size_t>(fastLayout.size) + 16, 0);
+			}
 			DC_INFO("collision: trace %s; budget %.1f ms (urgent %.1f), cells %.3f/%.3f, radius %d regions", traceLayout.ok ? "ready" : "MISSING", budgetMs,
 				urgentBudgetMs, fineCell, coarseCell, radiusRegions);
 		}
@@ -143,15 +174,22 @@ namespace discraft::Collision
 			auto* p = traceParms.data();
 			std::memcpy(p + traceLayout.traceEnd, &a_end, 12);
 			std::memcpy(p + traceLayout.traceStart, &a_start, 12);
+			// The world only (level, meshes, movers such as doors): characters aren't wanted anyway.
+			static const bool withActors = config::Bool("World", "bTraceActors", false);
 			if (traceLayout.traceActors >= 0) {
-				std::uint32_t v = traceLayout.traceActorsMask;
+				const std::uint32_t v = withActors ? traceLayout.traceActorsMask : 0u;
 				std::memcpy(p + traceLayout.traceActors, &v, 4);
 			}
 			// Every parameter but HitInfo (asking for it makes the trace look up surface materials);
 			// Extent and ExtraTraceFlags are passed as zero.
 			if (!ue3::CallFunction(a_pawn, Fn.trace, p, &traceLayout.passed)) {
+				if (++traceFailures >= 3 && !fastMode && fastLayout.ok) {
+					fastMode = true;
+					DC_WARN("collision: Trace doesn't work here; finding surfaces with FastTrace instead (slower)");
+				}
 				return out;
 			}
+			traceFailures = 0;
 			ue3::Addr actor = 0;
 			std::memcpy(&actor, p + traceLayout.returnValue, 4);
 			out.actor = actor;
@@ -168,9 +206,77 @@ namespace discraft::Collision
 			return out;
 		}
 
-		// Every surface in one vertical column, both ways.
+		// FastTrace: true when nothing of the world blocks the line (pawns don't count).
+		bool Clear(Obj a_pawn, const UeVector& a_from, const UeVector& a_to)
+		{
+			std::fill(fastParms.begin(), fastParms.end(), std::uint8_t(0));
+			auto* p = fastParms.data();
+			std::memcpy(p + fastLayout.traceEnd, &a_to, 12);
+			std::memcpy(p + fastLayout.traceStart, &a_from, 12);
+			++tracesTotal;
+			if (!ue3::CallFunction(a_pawn, Fn.fastTrace, p, &fastLayout.passed)) {
+				return true;
+			}
+			std::uint32_t clear = 0;
+			std::memcpy(&clear, p + fastLayout.returnValue, 4);
+			return clear != 0;
+		}
+
+		// Every surface in one vertical column, both ways, with FastTrace: from the current point,
+		// is anything in the way to the end? Then halve towards it until the gap is a 32nd of a
+		// block. Normals aren't known: surfaces count as flat.
+		void FastColumn(Obj a_pawn, double a_x, double a_z, float a_yMin, float a_yMax, std::vector<mesher::Hit>& a_out)
+		{
+			a_out.clear();
+			const double upb = State().unitsPerBlock;
+			const double eps = 1.0 / 32.0;
+			const double step = 0.02;
+			for (int dir = 0; dir < 2; ++dir) {
+				const bool   down = dir == 0;
+				double       y = down ? a_yMax : a_yMin;
+				const double yEnd = down ? a_yMin : a_yMax;
+				for (int n = 0; n < kMaxHits; ++n) {
+					if (down ? y <= yEnd + eps : y >= yEnd - eps) {
+						break;
+					}
+					const auto from = McToUe(a_x, y, a_z, upb);
+					if (Clear(a_pawn, from, McToUe(a_x, yEnd, a_z, upb))) {
+						break;
+					}
+					double clearTo = y, blockedBy = yEnd;  // the line from y is clear to clearTo, blocked by blockedBy
+					while (std::abs(blockedBy - clearTo) > eps) {
+						const double mid = 0.5 * (clearTo + blockedBy);
+						if (Clear(a_pawn, from, McToUe(a_x, mid, a_z, upb))) {
+							clearTo = mid;
+						} else {
+							blockedBy = mid;
+						}
+					}
+					const double at = 0.5 * (clearTo + blockedBy);
+					if (std::abs(at - y) < 2.0 * eps) {
+						y += down ? -0.125 : 0.125;  // started inside something: step through it
+						continue;
+					}
+					mesher::Hit  h;
+					h.y = static_cast<float>(at);
+					h.up = down;
+					h.nx = 0.0f;
+					h.ny = down ? 1.0f : -1.0f;
+					h.nz = 0.0f;
+					a_out.push_back(h);
+					y = at + (down ? -step : step);
+				}
+			}
+		}
+
+		// Every surface in one vertical column, both ways. Lines longer than kMaxTraceBlocks are
+		// traced a piece at a time.
 		void TraceColumn(Obj a_pawn, double a_x, double a_z, float a_yMin, float a_yMax, std::vector<mesher::Hit>& a_out)
 		{
+			if (fastMode) {
+				FastColumn(a_pawn, a_x, a_z, a_yMin, a_yMax, a_out);
+				return;
+			}
 			a_out.clear();
 			const double upb = State().unitsPerBlock;
 			const double step = 0.02;  // move past a surface before looking for the next one
@@ -178,13 +284,15 @@ namespace discraft::Collision
 				const bool down = dir == 0;
 				double     y = down ? a_yMax : a_yMin;
 				const double yEnd = down ? a_yMin : a_yMax;
-				for (int n = 0; n < kMaxHits * 2; ++n) {
+				for (int n = 0; n < kMaxHits * 4; ++n) {
 					if (down ? y <= yEnd : y >= yEnd) {
 						break;
 					}
-					const auto hit = Trace(a_pawn, McToUe(a_x, y, a_z, upb), McToUe(a_x, yEnd, a_z, upb));
+					const double pieceEnd = down ? std::max(yEnd, y - kMaxTraceBlocks) : std::min(yEnd, y + kMaxTraceBlocks);
+					const auto   hit = Trace(a_pawn, McToUe(a_x, y, a_z, upb), McToUe(a_x, pieceEnd, a_z, upb));
 					if (!hit.hit) {
-						break;
+						y = pieceEnd;  // nothing in this piece: on to the next
+						continue;
 					}
 					const auto   at = UeToMc(hit.location, upb);
 					const auto   normal = UeDirToMc(hit.normal.x, hit.normal.y, hit.normal.z);
@@ -368,7 +476,11 @@ namespace discraft::Collision
 			Configure();
 		}
 		Flush();
-		if (!traceLayout.ok || ue3::ProcessEventIndex() <= 0 || !a_pawn || outbox.size() > 64) {
+		if (!traceLayout.ok && fastLayout.ok && !fastMode) {
+			fastMode = true;
+			DC_WARN("collision: no Trace; finding surfaces with FastTrace (slower)");
+		}
+		if ((!traceLayout.ok && !fastMode) || ue3::ProcessEventIndex() <= 0 || !a_pawn || outbox.size() > 64) {
 			return;
 		}
 		if (Link::Get().CollisionSpace() < (4ull << 20)) {
@@ -417,8 +529,8 @@ namespace discraft::Collision
 	std::string Summary()
 	{
 		char buf[160];
-		std::snprintf(buf, sizeof(buf), "%d regions sent, %lld traces, %lld surfaces, outbox %zu%s", regionsSent, tracesTotal, hitsTotal, outbox.size(),
-			traceLayout.ok ? "" : " (Trace missing)");
+		std::snprintf(buf, sizeof(buf), "%d regions sent, %lld traces, %lld surfaces, outbox %zu%s%s", regionsSent, tracesTotal, hitsTotal, outbox.size(),
+			traceLayout.ok ? "" : " (Trace missing)", fastMode ? " (FastTrace mode)" : "");
 		return buf;
 	}
 }
