@@ -1107,47 +1107,63 @@ namespace discraft::ue3
 			if (!mem::InCode(func) || func == processInternal) {
 				return 0;
 			}
-			struct Parm
+			// The parameter list of each native, worked out once.
+			struct NativeInfo
 			{
-				Obj           prop;
-				std::uint64_t flags;
-				bool          isReturn;
+				std::vector<std::pair<int, Obj>> ordered;  // (offset, property), in offset order
+				int                              returnOffset{ -1 };
+				bool                             flagsKnown{ false };
+				std::string                      activity;  // for the crash log
 			};
-			std::vector<Parm> parms;
-			for (const Obj p : ChildrenOf(a_function)) {
-				const auto kind = NameOf(ClassOf(p));
-				if (kind.size() < 8 || kind.compare(kind.size() - 8, 8, "Property") != 0) {
-					continue;
+			static std::unordered_map<Obj, NativeInfo> infos;
+			auto it = infos.find(a_function);
+			if (it == infos.end()) {
+				NativeInfo info;
+				struct Parm
+				{
+					Obj           prop;
+					std::uint64_t flags;
+					bool          isReturn;
+				};
+				std::vector<Parm> parms;
+				for (const Obj p : ChildrenOf(a_function)) {
+					const auto kind = NameOf(ClassOf(p));
+					if (kind.size() < 8 || kind.compare(kind.size() - 8, 8, "Property") != 0) {
+						continue;
+					}
+					const auto flags = Rd<std::uint64_t>(p + L.elementSize + 4);
+					parms.push_back({ p, flags, NameOf(p) == "ReturnValue" || (flags & kCpfReturnParm) != 0 });
 				}
-				const auto flags = Rd<std::uint64_t>(p + L.elementSize + 4);
-				parms.push_back({ p, flags, NameOf(p) == "ReturnValue" || (flags & kCpfReturnParm) != 0 });
-			}
-			// PropertyFlags sit right after ElementSize in every UE3 build seen; if the flags don't
-			// look like parameter flags, a native's properties are all parameters anyway.
-			bool flagsKnown = false;
-			for (const auto& p : parms) {
-				flagsKnown = flagsKnown || (p.flags & kCpfParm) != 0;
-			}
-			// The native reads its parameters in declaration order, which is the order of their
-			// offsets in the frame (the Children list needn't be: UE3 SDK generators sort by offset
-			// too). Locals, if any, come after the parameters.
-			int returnOffset = -1;
-			std::vector<std::pair<int, Obj>> ordered;
-			for (const auto& p : parms) {
-				const int offset = Rd<std::int32_t>(p.prop + L.offset);
-				if (p.isReturn) {
-					returnOffset = offset;
-				} else if (!flagsKnown || (p.flags & kCpfParm)) {
-					ordered.emplace_back(offset, p.prop);
+				// PropertyFlags sit right after ElementSize in every UE3 build seen; if the flags
+				// don't look like parameter flags, a native's properties are all parameters anyway.
+				for (const auto& p : parms) {
+					info.flagsKnown = info.flagsKnown || (p.flags & kCpfParm) != 0;
 				}
+				// The native reads its parameters in declaration order, which is the order of their
+				// offsets in the frame (the Children list needn't be: UE3 SDK generators sort by
+				// offset too). Locals, if any, come after the parameters.
+				for (const auto& p : parms) {
+					const int offset = Rd<std::int32_t>(p.prop + L.offset);
+					if (p.isReturn) {
+						info.returnOffset = offset;
+					} else if (!info.flagsKnown || (p.flags & kCpfParm)) {
+						info.ordered.emplace_back(offset, p.prop);
+					}
+				}
+				std::sort(info.ordered.begin(), info.ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+				info.activity = "calling native " + PathOf(a_function);
+				it = infos.emplace(a_function, std::move(info)).first;
 			}
-			std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+			const auto& ordered = it->second.ordered;
+			const int   returnOffset = it->second.returnOffset;
+			const bool  flagsKnown = it->second.flagsKnown;
 			// A parameter the call doesn't set is passed as EX_Nothing, the way an omitted optional
 			// parameter reaches a native: it keeps its default (and an optional out parameter, such
 			// as Trace's HitInfo, is absent). Ending the list early instead is not understood by this
 			// engine: the native reads on past EX_EndFunctionParms.
-			std::vector<std::uint8_t> code;
-			std::size_t               passed = 0;
+			static std::vector<std::uint8_t> code;  // game thread only
+			code.clear();
+			std::size_t passed = 0;
 			const auto leftOut = [&](int a_offset) { return a_passed && std::find(a_passed->begin(), a_passed->end(), a_offset) == a_passed->end(); };
 			for (const auto& [offset, prop] : ordered) {
 				if (leftOut(offset)) {
@@ -1190,9 +1206,7 @@ namespace discraft::ue3
 			std::uint8_t scratch[64]{};
 			NativeCall   call{ reinterpret_cast<NativeFn>(func), reinterpret_cast<void*>(a_object), frame.data(),
                 returnOffset >= 0 ? static_cast<void*>(a_parms + returnOffset) : static_cast<void*>(scratch) };
-			static std::string activity;
-			activity = "calling native " + PathOf(a_function) + " on " + FullNameOf(a_object);
-			seh::SetActivity(activity.c_str());
+			seh::SetActivity(it->second.activity.c_str());
 			seh::Fault fault;
 			const bool ran = seh::Run(&DoNative, &call, fault);
 			seh::SetActivity(nullptr);
