@@ -10,8 +10,9 @@
 #include <string>
 #include <thread>
 
-#define WIN32_LEAN_AND_MEAN
+// Not WIN32_LEAN_AND_MEAN: the shell's COM headers (exdisp.h) need OLE's definitions.
 #include <windows.h>
+#include <ole2.h>
 #include <tlhelp32.h>
 #include <exdisp.h>
 #include <servprov.h>

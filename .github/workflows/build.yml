@@ -13,7 +13,7 @@ jobs:
     name: Dishonored plugin (MinGW) + unit tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install -y mingw-w64 cmake
       - name: Unit tests (coordinates, collision mesher, UE3 discovery on a fake engine)
@@ -27,7 +27,7 @@ jobs:
           cmake --build build/native -j
           i686-w64-mingw32-strip build/native/DisCraft.asi
           file build/native/DisCraft.asi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: discraft-asi
           path: build/native/DisCraft.asi
@@ -36,12 +36,12 @@ jobs:
     name: Dishonored plugin (MSVC, Win32)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build DisCraft.asi with MSVC
         run: |
           cmake -S native -B build/native -A Win32
           cmake --build build/native --config Release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: discraft-asi-msvc
           path: build/native/Release/DisCraft.asi
@@ -50,18 +50,18 @@ jobs:
     name: Minecraft mod (Fabric 26.3)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - name: Build and test
         working-directory: fabric
         run: |
           chmod +x gradlew
           ./gradlew build --no-configuration-cache --stacktrace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: discraft-fabric
           path: fabric/build/libs/discraft-*.jar
@@ -71,12 +71,12 @@ jobs:
     needs: [native, fabric]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           name: discraft-asi
           path: build/native
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: discraft-fabric
           path: fabric/build/libs
@@ -84,7 +84,7 @@ jobs:
         run: |
           ls -la build/native fabric/build/libs
           python3 tools/package.py --asi build/native/DisCraft.asi --jar "$(ls fabric/build/libs/discraft-*.jar | grep -v sources | head -1)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DisCraft-release
           path: dist/
