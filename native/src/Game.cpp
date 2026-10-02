@@ -238,8 +238,9 @@ namespace discraft
 		// ---- the pawn -----------------------------------------------------------------------------
 		void SetIgnoreInput(Obj a_pc, bool a_ignore)
 		{
+			const bool lookToo = !State().lookByGame;
 			for (const auto* f : { &F.ignoreMoveInput, &F.ignoreLookInput }) {
-				if (!*f) {
+				if (!*f || (f == &F.ignoreLookInput && !lookToo && a_ignore)) {
 					continue;
 				}
 				if (f->kind == "BoolProperty") {
@@ -804,7 +805,9 @@ namespace discraft
 			ue3::Set(a_pawn, F.acceleration, UeVector{});
 
 			const bind::Rot3i look{ McPitchToUe(st.pitch), McYawToUe(st.yaw), 0 };
-			ue3::Set(a_pc, F.rotation, look);
+			if (!st.lookByGame) {
+				ue3::Set(a_pc, F.rotation, look);
+			}
 			ue3::Set(a_pawn, F.rotation, bind::Rot3i{ 0, look.yaw, 0 });
 
 			// The game's camera at Minecraft's eye (lower while sneaking).
@@ -1090,6 +1093,12 @@ namespace discraft
 			const bool puppet = live && (gameDrives ? flyingStable : mc.teleportAck == teleportSeq);
 			const bool following = gameDrives && live && !puppet;
 			st.mirrorButtons = following;
+			st.lookByGame = gameDrives && puppet;
+			if (st.lookByGame) {
+				// The game's mouse look is the look (smooth, as when walking).
+				st.yaw = UeYawToMc(pcRot.yaw);
+				st.pitch = UePitchToMc(pcRot.pitch);
+			}
 			if (puppet && !wasPuppet) {
 				st.yaw = UeYawToMc(pcRot.yaw);
 				st.pitch = UePitchToMc(pcRot.pitch);

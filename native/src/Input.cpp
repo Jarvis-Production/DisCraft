@@ -164,6 +164,9 @@ namespace discraft::Input
 		Source    activeSource = Source::kNone;
 		ULONGLONG activeSourceMs = 0;
 
+		// Flying (Minecraft drives) with the game still turning the camera: mouse movement stays the game's.
+		bool LookByGame() { return State().lookByGame.load() && !State().mcScreenOpen; }
+
 		bool Routing()
 		{
 			auto& st = State();
@@ -358,7 +361,7 @@ namespace discraft::Input
 			const auto* raw = reinterpret_cast<const RAWINPUT*>(buffer);
 			if (raw->header.dwType == RIM_TYPEMOUSE) {
 				const auto& m = raw->data.mouse;
-				if (!(m.usFlags & MOUSE_MOVE_ABSOLUTE) && Routing()) {
+				if (!(m.usFlags & MOUSE_MOVE_ABSOLUTE) && Routing() && !LookByGame()) {
 					AddDelta(m.lLastX, m.lLastY, Source::kRaw);
 				}
 				if (rawButtons) {
@@ -479,13 +482,13 @@ namespace discraft::Input
 				}
 				break;
 			case WM_MOUSEMOVE:
-				if (Routing()) {
+				if (Routing() && !LookByGame()) {
 					return 0;
 				}
 				break;
 			case WM_INPUT:
 				OnRawInput(a_lParam);
-				if (Routing()) {
+				if (Routing() && !LookByGame()) {
 					return ::DefWindowProcW(a_hwnd, a_msg, a_wParam, a_lParam);
 				}
 				break;
@@ -581,7 +584,15 @@ namespace discraft::Input
 				}
 				return hr;
 			}
-			if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
+			if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE) && LookByGame()) {
+				// Buttons to Minecraft, movement left to the game.
+				auto*                          ms = static_cast<DIMOUSESTATE*>(a_data);
+				static constexpr std::uint16_t kSdl[4] = { 1, 3, 2, 4 };
+				for (int b = 0; b < 4; ++b) {
+					OnButton(kSdl[b], (ms->rgbButtons[b] & 0x80) != 0);
+				}
+				std::memset(ms->rgbButtons, 0, sizeof(ms->rgbButtons));
+			} else if (type == DI8DEVTYPE_MOUSE && a_size >= sizeof(DIMOUSESTATE)) {
 				const auto* ms = static_cast<const DIMOUSESTATE*>(a_data);
 				AddDelta(ms->lX, ms->lY, Source::kDirectInput, a_device);
 				std::memset(a_data, 0, a_size);
@@ -665,6 +676,18 @@ namespace discraft::Input
 			auto* bytes = reinterpret_cast<std::uint8_t*>(a_data);
 			for (DWORD i = 0; i < *a_inOut; ++i) {
 				auto* e = reinterpret_cast<DIDEVICEOBJECTDATA*>(bytes + std::size_t(i) * a_size);
+				if (type == DI8DEVTYPE_MOUSE && LookByGame()) {
+					if (e->dwOfs >= DIMOFS_BUTTON0 && e->dwOfs <= DIMOFS_BUTTON7) {
+						static constexpr std::uint16_t kSdl[8] = { 1, 3, 2, 4, 5, 0, 0, 0 };
+						if (const auto b = kSdl[e->dwOfs - DIMOFS_BUTTON0]) {
+							OnButton(b, (e->dwData & 0x80) != 0);
+						}
+						continue;
+					}
+					std::memmove(bytes + std::size_t(kept) * a_size, e, a_size);  // movement: the game's
+					++kept;
+					continue;
+				}
 				if (type == DI8DEVTYPE_MOUSE) {
 					if (e->dwOfs == DIMOFS_X) {
 						AddDelta(static_cast<long>(e->dwData), 0, Source::kDirectInput, reinterpret_cast<const char*>(a_device) + 1);

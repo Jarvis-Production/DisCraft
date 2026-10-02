@@ -34,6 +34,8 @@ namespace discraft
 		std::atomic<bool> routeInput{ false };
 		// The game moves its player (bGameDrives): only mouse buttons, the wheel and 1-9 go to Minecraft.
 		std::atomic<bool> mirrorButtons{ false };
+		// Minecraft drives but the game turns the camera with the mouse (flying with bGameDrives).
+		std::atomic<bool> lookByGame{ false };
 		std::atomic<bool> mcScreenOpen{ false };
 		std::atomic<bool> gameMenuOpen{ false };
 		std::atomic<bool> mcInWorld{ false };
