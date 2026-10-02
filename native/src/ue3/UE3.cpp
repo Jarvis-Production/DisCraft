@@ -6,6 +6,7 @@
 #include "../Log.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <unordered_map>
 
@@ -1126,20 +1127,40 @@ namespace discraft::ue3
 			for (const auto& p : parms) {
 				flagsKnown = flagsKnown || (p.flags & kCpfParm) != 0;
 			}
-			std::vector<std::uint8_t> code;
-			int                       returnOffset = -1;
+			// The native reads its parameters in declaration order, which is the order of their
+			// offsets in the frame (the Children list needn't be: UE3 SDK generators sort by offset
+			// too). Locals, if any, come after the parameters.
+			int returnOffset = -1;
+			std::vector<std::pair<int, Obj>> ordered;
 			for (const auto& p : parms) {
+				const int offset = Rd<std::int32_t>(p.prop + L.offset);
 				if (p.isReturn) {
-					returnOffset = Rd<std::int32_t>(p.prop + L.offset);
-					continue;
+					returnOffset = offset;
+				} else if (!flagsKnown || (p.flags & kCpfParm)) {
+					ordered.emplace_back(offset, p.prop);
 				}
-				if (flagsKnown && !(p.flags & kCpfParm)) {
-					break;  // locals follow the parameters
-				}
+			}
+			std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+			std::vector<std::uint8_t> code;
+			for (const auto& [offset, prop] : ordered) {
 				code.push_back(kExLocalVariable);
-				const Addr ref = p.prop;
+				const Addr ref = prop;
 				const auto* bytes = reinterpret_cast<const std::uint8_t*>(&ref);
 				code.insert(code.end(), bytes, bytes + sizeof(ref));
+			}
+			// What was passed, once per function, for the log.
+			static std::vector<Obj> described;
+			if (described.size() < 8 && std::find(described.begin(), described.end(), a_function) == described.end()) {
+				described.push_back(a_function);
+				std::string list;
+				for (const auto& [offset, prop] : ordered) {
+					list += (list.empty() ? "" : ", ") + NameOf(prop) + "@0x" + [](int v) {
+						char b[16];
+						std::snprintf(b, sizeof(b), "%X", static_cast<unsigned>(v));
+						return std::string(b);
+					}(offset);
+				}
+				DC_INFO("UE3: native %s gets (%s), returns at 0x%X", PathOf(a_function).c_str(), list.c_str(), static_cast<unsigned>(returnOffset));
 			}
 			code.push_back(kExEndFunctionParms);
 			code.insert(code.end(), 16, std::uint8_t(0));
@@ -1167,7 +1188,7 @@ namespace discraft::ue3
 			static bool logged = false;
 			if (!logged) {
 				logged = true;
-				DC_INFO("UE3: natives are called directly (first: %s, %zu parameter(s), flags %s)", PathOf(a_function).c_str(), (code.size() - 17) / 5,
+				DC_INFO("UE3: natives are called directly (first: %s, %zu parameter(s), flags %s)", PathOf(a_function).c_str(), ordered.size(),
 					flagsKnown ? "known" : "not recognised");
 			}
 			return 1;

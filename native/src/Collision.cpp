@@ -347,6 +347,8 @@ namespace discraft::Collision
 		const std::uint32_t payload = a_epoch;
 		Queue(proto::kColClear, &payload, sizeof(payload), nullptr, 0);
 		Flush();
+		tracesLogged = 0;  // show the first traces of every new world
+		regionsLogged = 0;
 		DC_INFO("collision: reset (epoch %u)", a_epoch);
 	}
 

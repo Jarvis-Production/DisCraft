@@ -701,6 +701,8 @@ namespace discraft
 				}
 				if (arriving) {
 					SetIgnoreInput(a_pc, true);  // the game's controls don't move its player meanwhile
+					// The game's camera follows the controller: keep turning it with the mouse.
+					ue3::Set(a_pc, F.rotation, bind::Rot3i{ McPitchToUe(st.pitch), McYawToUe(st.yaw), 0 });
 				}
 				st.feetValid = false;
 			}
