@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "discraft",
+  "version": "${version}",
+  "name": "DisCraft",
+  "description": "Play Dishonored as a Minecraft player: Minecraft physics, inventory, blocks and combat inside Dunwall. Based on SkyCraft by chasmlol.",
+  "authors": ["Jarvis-Production"],
+  "contributors": ["chasmlol (SkyCraft, the mod DisCraft is built from)"],
+  "contact": {
+    "sources": "https://github.com/Jarvis-Production/DisCraft"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": ["dev.discraft.DisCraft"],
+    "client": ["dev.discraft.client.DisCraftClient"]
+  },
+  "mixins": [
+    "discraft.mixins.json",
+    { "config": "discraft.client.mixins.json", "environment": "client" }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
