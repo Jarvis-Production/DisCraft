@@ -234,4 +234,7 @@ namespace discraft::ue3
 	// call works out where FFrame keeps them.
 	std::uint8_t* FrameLocals(void* a_frame, Obj a_function, Obj a_self);
 	Obj           FrameFunction(void* a_frame);
+	// Whether script made this call (the frame has a PreviousFrame) or native code did, through
+	// ProcessEvent (it hasn't): 1 or 0, -1 while the frame's layout is unknown.
+	int           FrameCalledFromScript(void* a_frame, Obj a_self);
 }

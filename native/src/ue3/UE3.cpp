@@ -1185,4 +1185,27 @@ namespace discraft::ue3
 		}
 		return Rd<Addr>(frame + L.frameNode);
 	}
+
+	int FrameCalledFromScript(void* a_frame, Obj a_self)
+	{
+		const auto frame = reinterpret_cast<std::uintptr_t>(a_frame);
+		if (!frame || !Ok(frame, 0x60)) {
+			return -1;
+		}
+		if (L.frameNode < 0) {
+			// FFrame: ..., Node, Object, Code, Locals, PreviousFrame. Node is the running function.
+			for (int k = 0; k + 20 <= 0x60; k += 4) {
+				const Obj node = Rd<Addr>(frame + k);
+				if (Rd<Addr>(frame + k + 4) == a_self && IsObject(node) && NameOf(ClassOf(node)) == "Function") {
+					L.frameNode = k;
+					DC_INFO("UE3: FFrame::Node at 0x%X (Locals at 0x%X, PreviousFrame at 0x%X)", k, k + 12, k + 16);
+					break;
+				}
+			}
+			if (L.frameNode < 0) {
+				return -1;
+			}
+		}
+		return Rd<Addr>(frame + L.frameNode + 16) != 0 ? 1 : 0;
+	}
 }

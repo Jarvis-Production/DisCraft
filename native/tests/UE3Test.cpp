@@ -139,6 +139,21 @@ namespace
 		CHECK(ue3::GetBool(someone, hidden));
 		CHECK(!ue3::GetBool(someone, ue3::FindField(actor, "bStatic")));
 
+		// FFrame: a native call (ProcessEvent) has no PreviousFrame, a script call has one.
+		{
+			const auto tick = ue3::FindFunction(pc, "PlayerTick");
+			const auto self = engine->Object("ThePlayerController", pc, 0);
+			const auto frame = engine->Alloc(0x60);
+			auto       put = [&](int a_off, std::uint32_t a_v) { std::memcpy(reinterpret_cast<void*>(static_cast<std::uintptr_t>(frame + a_off)), &a_v, 4); };
+			put(0x0C, tick);
+			put(0x10, self);
+			put(0x1C, 0);
+			CHECK_EQ(ue3::FrameCalledFromScript(reinterpret_cast<void*>(static_cast<std::uintptr_t>(frame)), self), 0);
+			put(0x1C, frame + 0x40);
+			CHECK_EQ(ue3::FrameCalledFromScript(reinterpret_cast<void*>(static_cast<std::uintptr_t>(frame)), self), 1);
+			CHECK_EQ(ue3::FrameFunction(reinterpret_cast<void*>(static_cast<std::uintptr_t>(frame))), tick);
+		}
+
 		mem::SetReadableOverride(nullptr);
 		fake::Engine::Current() = nullptr;
 	}

@@ -636,13 +636,18 @@ namespace discraft
 		}
 
 		// ---- finding ProcessEvent ---------------------------------------------------------------
-		// The first time the engine calls PlayerTick natively it does so through UObject::ProcessEvent:
-		// our hook's return address is inside it. ProcessEvent's vtable slot is the entry whose
-		// function starts closest below that address.
+		// When native code calls a script event (eventTick, eventPostRender, ...) it goes through
+		// UObject::ProcessEvent, which calls the function's Func: a hook on Func then returns into
+		// ProcessEvent, whose vtable slot is the entry starting closest below that address. A call
+		// made by script (CallFunction) also lands in Func, so only frames without a calling script
+		// frame count. Besides the per-frame hook, script Tick/PostRender functions are probed for
+		// this until it is found.
+		std::unordered_map<Obj, void*> probes;  // probed function -> its Func
+
 		void FindProcessEvent(Obj a_self, std::uintptr_t a_returnAddress)
 		{
-			processEventSearched = true;
 			if (ue3::ProcessEventIndex() > 0) {
+				processEventSearched = true;
 				return;
 			}
 			const auto     vtable = static_cast<std::uintptr_t>(mem::Read<ue3::Addr>(a_self));
@@ -662,10 +667,65 @@ namespace discraft
 				}
 			}
 			if (best > 0) {
+				processEventSearched = true;
 				ue3::SetProcessEventIndex(best);
-				DC_INFO("UE3: ProcessEvent is vtable slot %d (0x%X) [returned to +0x%X]", best, best * 4, static_cast<unsigned>(a_returnAddress - bestAddr));
+				DC_INFO("UE3: ProcessEvent is vtable slot %d (0x%X) [returned to +0x%X from a native call on %s]", best, best * 4,
+					static_cast<unsigned>(a_returnAddress - bestAddr), ue3::FullNameOf(a_self).c_str());
 			} else {
-				DC_ERROR("UE3: couldn't find ProcessEvent in the vtable (set [Engine] iProcessEventIndex in DisCraft.ini)");
+				static bool warned = false;
+				if (!warned) {
+					warned = true;
+					DC_WARN("UE3: a native call didn't return into a virtual function; still looking for ProcessEvent");
+				}
+			}
+		}
+
+		void RemoveProbes()
+		{
+			for (const auto& [f, original] : probes) {
+				ue3::SetFunc(f, original);
+			}
+			if (!probes.empty()) {
+				DC_INFO("UE3: removed %d ProcessEvent probes", static_cast<int>(probes.size()));
+			}
+			probes.clear();
+		}
+
+		void DC_FASTCALL ProbeThunk(void* a_self, void* /*edx*/, void* a_frame, void* a_result)
+		{
+#ifdef _MSC_VER
+			const auto ra = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+#else
+			const auto ra = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+#endif
+			if (!processEventSearched && ue3::FrameCalledFromScript(a_frame, reinterpret_cast<Obj>(a_self)) == 0) {
+				FindProcessEvent(reinterpret_cast<Obj>(a_self), ra);
+			}
+			// Only script functions are probed: they all run ProcessInternal.
+			reinterpret_cast<ue3::NativeFn>(ue3::ProcessInternal())(a_self, a_frame, a_result);
+		}
+
+		void InstallProbes()
+		{
+			static int scannedCount = -1;
+			if (processEventSearched || ue3::ProcessEventIndex() > 0 || !ue3::ProcessInternal() || ue3::ObjectCount() == scannedCount) {
+				return;
+			}
+			scannedCount = ue3::ObjectCount();
+			const auto processInternal = reinterpret_cast<void*>(ue3::ProcessInternal());
+			int        added = 0;
+			for (const auto& name : config::List("Engine", "sProbeFunctions", "Tick,PostRender,PlayerTick,UpdateCamera")) {
+				for (const Obj f : ue3::FunctionsNamed(name)) {
+					if (probes.count(f) || tickOriginals.count(f) || ue3::GetFunc(f) != processInternal) {
+						continue;
+					}
+					probes.emplace(f, processInternal);
+					ue3::SetFunc(f, reinterpret_cast<void*>(&ProbeThunk));
+					++added;
+				}
+			}
+			if (added) {
+				DC_INFO("UE3: probing %d script events for ProcessEvent", added);
 			}
 		}
 
@@ -706,8 +766,11 @@ namespace discraft
 			}
 			--tickDepth;
 			if (outermost) {
-				if (!processEventSearched) {
+				if (!processEventSearched && ue3::FrameCalledFromScript(a_frame, self) == 0) {
 					FindProcessEvent(self, ra);
+				}
+				if (processEventSearched && !probes.empty()) {
+					RemoveProbes();
 				}
 				Tick(self);
 			}
@@ -731,6 +794,10 @@ namespace discraft
 					continue;
 				}
 				void* original = ue3::GetFunc(f);
+				if (const auto probe = probes.find(f); probe != probes.end()) {
+					original = probe->second;  // ours from now on, not a probe's
+					probes.erase(probe);
+				}
 				if (!original || original == reinterpret_cast<void*>(&PlayerTickThunk)) {
 					continue;
 				}
@@ -837,6 +904,7 @@ namespace discraft
 			auto& st = State();
 			if (st.installed) {
 				HookTickFunctions();  // overrides from packages loaded since
+				InstallProbes();
 				return true;
 			}
 			static bool bound = false;
@@ -860,6 +928,7 @@ namespace discraft
 				}
 				return false;
 			}
+			InstallProbes();
 			Actors::Install();
 			st.installed = true;
 			tickMissing = false;
