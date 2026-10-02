@@ -50,7 +50,8 @@ namespace discraft::MeshWorld
 			int  inner{ 0 };      // offset in the object that pointer leads to
 			int  stride{ 12 };
 		};
-		Path lastPath;
+		Path              lastPath;
+		std::vector<Path> knownPaths;  // every layout that worked so far (tried before searching)
 
 		std::vector<Tri>                                 tris;
 		std::unordered_map<long long, std::vector<int>> buckets;  // 1-block xz cells -> tris
@@ -81,12 +82,16 @@ namespace discraft::MeshWorld
 
 		bool FitsBounds(std::uintptr_t a_data, int a_count, int a_stride, const float a_lo[3], const float a_hi[3])
 		{
-			const int n = std::min(a_count, 128);
-			int       inside = 0;
+			const int n = std::min(a_count, 64);
+			if (n < 3 || a_data < 0x10000 || !mem::Readable(a_data, static_cast<std::size_t>(n) * a_stride)) {
+				return false;
+			}
+			int inside = 0;
 			for (int i = 0; i < n; ++i) {
 				float p[3];
+				std::memcpy(p, reinterpret_cast<const void*>(a_data + static_cast<std::uintptr_t>(i) * a_stride), 12);
 				for (int c = 0; c < 3; ++c) {
-					if (!Rd(a_data + static_cast<std::uintptr_t>(i) * a_stride + c * 4, p[c]) || !std::isfinite(p[c])) {
+					if (!std::isfinite(p[c])) {
 						return false;
 					}
 				}
@@ -145,14 +150,26 @@ namespace discraft::MeshWorld
 
 		bool FindPoints(std::uintptr_t a_render, int a_minCount, const float a_lo[3], const float a_hi[3], Points& a_out)
 		{
-			if (lastPath.outer >= 0 && TryPath(a_render, lastPath, a_minCount, a_lo, a_hi, a_out)) {
-				return true;
+			for (const Path& p : knownPaths) {
+				if (TryPath(a_render, p, a_minCount, a_lo, a_hi, a_out)) {
+					return true;
+				}
 			}
-			for (const int stride : { 12, 16, 20, 24, 28, 32 }) {
-				for (int outer = 0; outer < 0x300; outer += 4) {
+			const auto remember = [](const Path& a_p) {
+				if (knownPaths.size() < 16) {
+					knownPaths.push_back(a_p);
+				}
+			};
+			// The search is slow: only while few layouts are known (they repeat across meshes).
+			if (knownPaths.size() >= 6) {
+				return false;
+			}
+			for (const int stride : { 12, 24, 16 }) {
+				for (int outer = 0; outer < 0x100; outer += 4) {
 					Path p{ outer, false, 0, stride };
 					if (TryPath(a_render, p, a_minCount, a_lo, a_hi, a_out)) {
 						lastPath = p;
+						remember(p);
 						DC_INFO("mesh: vertex positions at render data +0x%X (array), stride %d", outer, stride);
 						return true;
 					}
@@ -160,6 +177,7 @@ namespace discraft::MeshWorld
 						p = { outer, true, inner, stride };
 						if (TryPath(a_render, p, a_minCount, a_lo, a_hi, a_out)) {
 							lastPath = p;
+							remember(p);
 							DC_INFO("mesh: vertex positions at render data +0x%X -> +0x%X, stride %d", outer, inner, stride);
 							return true;
 						}
@@ -478,7 +496,15 @@ namespace discraft::MeshWorld
 				if (ue3::GetBool(o, bind::F.hiddenGame)) {
 					continue;
 				}
-				// The whole prop goes: not drawn, nothing to bump into.
+				// The whole prop goes: not drawn, nothing to bump into. Props in a level's mesh collection
+				// only leave the scene when detached from their actor (hiding alone isn't redrawn).
+				static const Obj detach = ue3::FindFunction(bind::C.actor, "DetachComponent");
+				const Obj        owner = ue3::OuterOf(o);
+				if (detach && owner && ue3::IsA(owner, bind::C.actor)) {
+					ue3::Params d(detach);
+					d.Set<ue3::Addr>("ExComponent", static_cast<ue3::Addr>(o));
+					d.Invoke(owner);
+				}
 				bool hid = false;
 				if (bind::Fn.setComponentHidden) {
 					ue3::Params h(bind::Fn.setComponentHidden);
